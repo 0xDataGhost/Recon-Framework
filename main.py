@@ -247,19 +247,19 @@ def cmd_install_tools(config: dict[str, Any]) -> None:
     table.add_column("Version", style="dim")
     table.add_column("Path", style="dim")
 
-    all_ok = True
+    any_failed = False
     for name, status in statuses.items():
         if status.installed:
             table.add_row(
                 name, "[green]OK[/green]", status.version or "—", status.path or "—"
             )
         else:
-            all_ok = False
             console.print(f"[yellow]Installing {name}…[/yellow]")
             try:
                 tm.ensure_tool(name)
                 table.add_row(name, "[green]INSTALLED[/green]", "—", "—")
             except (ToolNotAvailableError, ToolInstallError) as exc:
+                any_failed = True
                 logger.error("tool_install_failed", extra=exc.to_dict())
                 table.add_row(
                     name,
@@ -269,7 +269,7 @@ def cmd_install_tools(config: dict[str, Any]) -> None:
                 )
 
     console.print(table)
-    if all_ok:
+    if not any_failed:
         console.print("[green]All tools are available.[/green]")
     else:
         console.print(
