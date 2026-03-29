@@ -219,6 +219,30 @@ Full documentation — module reference, exception system, structured logging, p
 
 ---
 
+## Contributing
+
+Contributions are welcome. Please follow these guidelines:
+
+1. **Fork and branch** — create a feature branch from `main` (`git checkout -b feature/my-change`)
+2. **One concern per PR** — keep pull requests focused; don't bundle unrelated changes
+3. **Type hints** — all Python must use type hints and be compatible with Python 3.11+
+4. **Exceptions** — use the structured exception hierarchy in `core/exceptions.py`; never raise bare `Exception`
+5. **Logging** — use `logger.error(..., extra=exc.to_dict())` for framework exceptions; never `print()` to stderr in library code
+6. **Tests** — add or update tests in `tests/` for any changed behaviour
+7. **Docs** — update `docs/usage.md` if you change a public interface or add a new module
+
+```bash
+# Run tests
+pytest tests/ -v --cov=. --cov-report=term-missing
+
+# Verify no import errors
+python main.py --help
+```
+
+Please open an issue before starting large changes so the approach can be agreed upfront.
+
+---
+
 ## Disclaimer
 
 This tool is intended for use against systems you own or have explicit written permission to test. Unauthorised use is illegal and unethical. Always operate within the scope of an agreed bug bounty programme or penetration testing engagement.

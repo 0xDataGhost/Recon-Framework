@@ -1,0 +1,20 @@
+# Web framework and real-time communication
+flask>=3.0.0
+flask-socketio>=5.3.6
+flask-cors>=4.0.0
+gevent>=23.9.1          # async worker for Flask-SocketIO
+
+# HTTP client and HTML parsing (used by intelligence layer)
+requests>=2.31.0
+beautifulsoup4>=4.12.3
+
+# Monitoring scheduler
+APScheduler>=3.10.4
+
+# CLI output
+rich>=13.7.1            # coloured tables, progress spinners
+tqdm>=4.66.2            # progress bars for batch operations
+
+# Development / testing (not required at runtime)
+pytest>=8.1.0
+pytest-cov>=5.0.0

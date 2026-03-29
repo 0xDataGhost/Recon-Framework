@@ -27,6 +27,233 @@
 
 ---
 
+## CLI Reference
+
+### Synopsis
+
+```
+python main.py [TARGET] [MODE] [OPTIONS]
+```
+
+A mode flag is always required. Target flags are required for `--scan` and `--monitor`.
+
+---
+
+### Target Flags
+
+| Flag | Argument | Description |
+|---|---|---|
+| `--target` | `DOMAIN` | Single domain to scan (e.g. `example.com`) |
+| `--targets` | `FILE` | Path to a newline-delimited file of domains. Lines starting with `#` are ignored. |
+
+`--target` and `--targets` are mutually exclusive. Domains are deduplicated before scanning.
+
+**`targets.txt` format:**
+```
+# Primary scope
+example.com
+api.example.com
+
+# Acquired subsidiary
+subsidiary.io
+```
+
+---
+
+### Mode Flags
+
+Exactly one mode must be chosen. Modes are mutually exclusive.
+
+#### `--scan`
+
+Run the full six-stage recon pipeline once, then run the intelligence pass and write all output files.
+
+```bash
+python main.py --target example.com --scan
+python main.py --targets targets.txt --scan
+```
+
+**What runs:**
+1. Subdomain enumeration (subfinder + amass)
+2. Live host detection (httpx)
+3. Port scanning (naabu)
+4. URL collection (gau + waybackurls)
+5. Endpoint classification
+6. Vulnerability scanning (nuclei) — skipped if `--no-nuclei`
+
+Then: JS analysis, vuln pattern detection, attack chain correlation, exploit generation, Top 10 scoring.
+
+**Output:** `output/{target}/` — see [Output Files](#output-files) below.
+
+---
+
+#### `--monitor`
+
+Start continuous monitoring mode. Runs the full pipeline on a repeating interval, diffs results against the previous snapshot, and dispatches alerts on changes.
+
+```bash
+python main.py --target example.com --monitor
+python main.py --targets targets.txt --monitor --interval 30
+```
+
+Runs until interrupted with `Ctrl+C`. Each cycle:
+- Runs the full recon pipeline
+- Compares results to the last saved snapshot
+- Sends Telegram/Discord alerts for new subdomains, new ports, and new nuclei findings
+- Saves the new snapshot to the database
+
+---
+
+#### `--install-tools`
+
+Check for required tools and install any that are missing. Does not require a target.
+
+```bash
+python main.py --install-tools
+```
+
+Checks: `subfinder`, `amass`, `httpx`, `naabu`, `nuclei`, `gau`, `waybackurls`
+Optional: `ffuf` (used only for generating ffuf commands in the attack plan)
+
+**Install strategy (in order):**
+1. Check `PATH` and `~/.local/bin/`
+2. If Go is available: `go install <module>@latest`
+3. Otherwise: download prebuilt binary from GitHub Releases
+
+Prints a status table on completion. Exits non-zero if any required tool could not be installed.
+
+---
+
+#### `--dashboard`
+
+Launch the Flask web dashboard to browse scan results from the database.
+
+```bash
+python main.py --dashboard
+```
+
+The dashboard reads from `data/recon.db`. No active scan is required — you can run `--dashboard` after a `--scan` completes. Default URL: `http://127.0.0.1:5000`
+
+---
+
+### Scan Options
+
+These flags modify the behaviour of `--scan`.
+
+#### `--no-nuclei`
+
+Skip Stage 6 (nuclei vulnerability scanning). Reduces scan time significantly for large scopes or when vulnerability scanning is handled separately.
+
+```bash
+python main.py --target example.com --scan --no-nuclei
+```
+
+All other stages (subdomain enum through intelligence pass) run as normal.
+
+---
+
+#### `--resume`
+
+Resume an interrupted scan. The framework saves a JSON checkpoint after each stage completes in `data/checkpoints/`. With `--resume`, completed stages are loaded from their checkpoints instead of re-running.
+
+```bash
+# First run — interrupted after Stage 3
+python main.py --target example.com --scan
+
+# Resume — Stages 1–3 are loaded from checkpoints, Stages 4–6 re-run
+python main.py --target example.com --scan --resume
+```
+
+If no checkpoint exists for the target, `--resume` is silently ignored and the scan starts fresh.
+
+> **Note:** checkpoints are keyed by target domain, not by scan UUID. Running `--resume` always resumes the most recent interrupted scan for that target.
+
+---
+
+### Monitor Options
+
+#### `--interval MINUTES`
+
+Set the monitoring interval in minutes. Only used with `--monitor`. Default: `60`.
+
+```bash
+python main.py --target example.com --monitor --interval 15
+```
+
+Minimum value: 1 minute. The interval timer starts after the previous cycle completes, so actual wall-clock time between alerts may exceed the interval if the scan itself takes longer than `--interval` minutes.
+
+---
+
+### Global Options
+
+#### `--config PATH`
+
+Path to the config file. Default: `config.json` in the current directory.
+
+```bash
+python main.py --target example.com --scan --config /etc/recon/config.json
+```
+
+#### `--log-level LEVEL`
+
+Set logging verbosity. Choices: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO`.
+
+```bash
+# Show all subprocess output and internal state transitions
+python main.py --target example.com --scan --log-level DEBUG
+```
+
+Logs are written to both stdout (human-readable) and `data/recon.log` (JSON, rotating).
+
+---
+
+### Output Files
+
+Every `--scan` writes to `output/{target}/`:
+
+| File | Contents |
+|---|---|
+| `subdomains.txt` | All discovered subdomains, one per line |
+| `live.txt` | Live hosts: `URL STATUS_CODE TITLE` |
+| `ports.txt` | Open ports: `HOST:PORT PROTOCOL SERVICE` |
+| `urls.txt` | Collected URLs from gau + waybackurls |
+| `nuclei.txt` | Nuclei findings: template ID, severity, matched URL |
+| `js_findings.txt` | JS analysis: endpoints, secrets, GraphQL detections |
+| `top_targets.txt` | Top 10 scored attack surfaces with reason tags |
+| `scan_report.json` | Full machine-readable report (all findings) |
+| `attack_plan.md` | Human-readable exploitation guide with copy-paste commands |
+
+---
+
+### Common Workflows
+
+#### Quick scope assessment (no vuln scan)
+```bash
+python main.py --target example.com --scan --no-nuclei
+```
+
+#### Full scan with monitoring after
+```bash
+# Step 1: initial full scan
+python main.py --target example.com --scan
+
+# Step 2: watch for changes every 2 hours
+python main.py --target example.com --monitor --interval 120
+```
+
+#### Large programme — multiple targets, no nuclei, debug logs
+```bash
+python main.py --targets scope.txt --scan --no-nuclei --log-level DEBUG
+```
+
+#### Check what the dashboard would show without re-scanning
+```bash
+python main.py --dashboard
+# open http://127.0.0.1:5000
+```
+
+---
+
 ## 1. Architecture Overview
 
 The framework enforces a strict three-layer separation. Data only flows forward — no layer reaches back into a previous one.
