@@ -24,6 +24,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+# Ensure the project root is on sys.path regardless of how/where the script
+# is invoked (e.g. via an alias, from a different cwd, or through a wrapper).
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 # ── Framework imports ─────────────────────────────────────────────────────────
 # Only core/exceptions.py is fully implemented. All other modules are imported
 # lazily inside command functions so a missing module produces a targeted error
