@@ -1,13 +1,16 @@
 """
 main.py — CLI entry point for the recon framework.
 
-Usage:
+Usage
+-----
     python main.py --target example.com --scan
     python main.py --targets targets.txt --scan --no-nuclei
-    python main.py --target example.com --monitor --interval 60
     python main.py --target example.com --scan --resume
+    python main.py --target example.com --monitor --interval 60
     python main.py --install-tools
     python main.py --dashboard
+
+For authorised security testing and bug bounty programs only.
 """
 
 from __future__ import annotations
@@ -22,22 +25,25 @@ from pathlib import Path
 from typing import Any
 
 # ── Framework imports ─────────────────────────────────────────────────────────
-# Modules beyond core/exceptions.py are imported lazily inside each command
-# function so that missing modules produce clear, targeted errors instead of
-# crashing immediately at startup.
+# Only core/exceptions.py is fully implemented. All other modules are imported
+# lazily inside command functions so a missing module produces a targeted error
+# message rather than crashing the CLI at startup.
 from core.exceptions import (
     CheckpointError,
     ConfigError,
     ReconBaseError,
+    ToolInstallError,
     ToolNotAvailableError,
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+VERSION = "0.1.0"
 CONFIG_PATH = Path("config.json")
 LOG_DIR = Path("data")
 LOG_FILE = LOG_DIR / "recon.log"
 OUTPUT_DIR = Path("output")
+CHECKPOINT_DIR = LOG_DIR / "checkpoints"
 
 DEFAULT_MONITOR_INTERVAL = 60  # minutes
 
@@ -45,7 +51,15 @@ DEFAULT_MONITOR_INTERVAL = 60  # minutes
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 class _JsonFormatter(logging.Formatter):
-    """Emit each log record as a single JSON object."""
+    """Emit each log record as a single-line JSON object."""
+
+    # Standard LogRecord attributes that are not extra user data.
+    _SKIP: frozenset[str] = frozenset({
+        "args", "created", "exc_info", "exc_text", "filename", "funcName",
+        "levelname", "levelno", "lineno", "message", "module", "msecs",
+        "msg", "name", "pathname", "process", "processName",
+        "relativeCreated", "stack_info", "thread", "threadName",
+    })
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -54,49 +68,42 @@ class _JsonFormatter(logging.Formatter):
             "logger": record.name,
             "event": record.getMessage(),
         }
-        # Merge any extra= kwargs passed by callers (e.g. exception .to_dict())
         for key, value in record.__dict__.items():
-            if key not in {
-                "args", "created", "exc_info", "exc_text", "filename",
-                "funcName", "levelname", "levelno", "lineno", "message",
-                "module", "msecs", "msg", "name", "pathname", "process",
-                "processName", "relativeCreated", "stack_info", "thread",
-                "threadName",
-            }:
+            if key not in self._SKIP:
                 payload[key] = value
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload)
 
 
-def _setup_logging(level: str = "INFO", json_output: bool = True) -> None:
+def _setup_logging(level: str = "INFO") -> None:
     """
-    Configure the root logger with a rotating file handler and a console handler.
+    Configure the root logger with a rotating JSON file handler and a
+    human-readable console handler.
 
     Args:
-        level:       Logging level string ("DEBUG", "INFO", "WARNING", "ERROR").
-        json_output: If True, emit JSON to the log file. Console output always
-                     uses a human-readable format.
+        level: Logging level string — ``"DEBUG"``, ``"INFO"``, ``"WARNING"``,
+               or ``"ERROR"``.
     """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
-    # Rotating file handler — JSON format
+    # Rotating file handler — JSON format, one object per line.
     file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
-    file_handler.setFormatter(_JsonFormatter() if json_output else logging.Formatter(
-        "%(asctime)s %(levelname)-8s %(name)s — %(message)s"
-    ))
+    file_handler.setFormatter(_JsonFormatter())
     root.addHandler(file_handler)
 
-    # Console handler — human-readable
+    # Console handler — human-readable, no JSON noise.
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)-8s %(name)s — %(message)s",
-                          datefmt="%H:%M:%S")
+        logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+            datefmt="%H:%M:%S",
+        )
     )
     root.addHandler(console_handler)
 
@@ -108,14 +115,22 @@ logger = logging.getLogger("recon.main")
 
 def _load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     """
-    Load config.json. Returns an empty dict if the file does not exist so the
-    framework can run with defaults before a config file is created.
+    Load and return the config file as a dict.
+
+    Returns an empty dict (safe defaults) when the file does not exist, so
+    the CLI remains usable before a config file has been created.
+
+    Args:
+        path: Path to the JSON config file.
 
     Raises:
-        ConfigError: if the file exists but is not valid JSON.
+        ConfigError: The file exists but is not valid JSON.
     """
     if not path.exists():
-        logger.warning("config_not_found", extra={"path": str(path)})
+        logger.warning(
+            "config_not_found",
+            extra={"path": str(path), "hint": f"cp config.example.json {path}"},
+        )
         return {}
     try:
         with path.open(encoding="utf-8") as fh:
@@ -132,11 +147,17 @@ def _resolve_targets(
     targets_file: str | None,
 ) -> list[str]:
     """
-    Resolve --target / --targets into a deduplicated list of domain strings.
+    Build a deduplicated list of domain strings from CLI arguments.
 
-    Raises:
-        SystemExit: if neither argument is provided, or the targets file is
-                    missing or empty.
+    Args:
+        target:       Value of ``--target``, or ``None``.
+        targets_file: Value of ``--targets``, or ``None``.
+
+    Returns:
+        Non-empty list of domain strings.
+
+    Exits:
+        With a message if no valid targets can be resolved.
     """
     domains: list[str] = []
 
@@ -144,17 +165,19 @@ def _resolve_targets(
         domains.append(target.strip())
 
     if targets_file:
-        path = Path(targets_file)
-        if not path.exists():
+        fpath = Path(targets_file)
+        if not fpath.exists():
             logger.error("targets_file_not_found", extra={"path": targets_file})
             sys.exit(f"[ERROR] Targets file not found: {targets_file}")
-        lines = [ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()]
-        domains.extend(ln for ln in lines if ln and not ln.startswith("#"))
+        lines = fpath.read_text(encoding="utf-8").splitlines()
+        domains.extend(
+            ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")
+        )
 
     if not domains:
         sys.exit("[ERROR] Provide --target <domain> or --targets <file>.")
 
-    # Deduplicate while preserving insertion order
+    # Deduplicate while preserving insertion order.
     seen: set[str] = set()
     unique: list[str] = []
     for d in domains:
@@ -165,17 +188,54 @@ def _resolve_targets(
     return unique
 
 
+def _find_latest_scan_id(target: str) -> str | None:
+    """
+    Look for the most recent checkpoint directory belonging to ``target``.
+
+    Each scan writes a ``target.txt`` marker into its checkpoint directory
+    when the first stage completes. This function finds the newest such
+    directory for the given target so ``--resume`` can reuse its ``scan_id``.
+
+    Args:
+        target: Domain string (e.g. ``"example.com"``).
+
+    Returns:
+        The scan UUID string if a checkpoint exists, otherwise ``None``.
+    """
+    if not CHECKPOINT_DIR.exists():
+        return None
+
+    candidates: list[tuple[float, str]] = []
+    for scan_dir in CHECKPOINT_DIR.iterdir():
+        if not scan_dir.is_dir():
+            continue
+        marker = scan_dir / "target.txt"
+        if marker.exists() and marker.read_text(encoding="utf-8").strip() == target:
+            candidates.append((scan_dir.stat().st_mtime, scan_dir.name))
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)  # newest first
+    return candidates[0][1]
+
+
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 def cmd_install_tools(config: dict[str, Any]) -> None:
-    """Check for required tools and install any that are missing."""
+    """
+    Check for all required tools and install any that are missing.
+
+    Args:
+        config: Loaded config dict.
+    """
     try:
         from core.tool_manager import ToolManager
     except ImportError:
         sys.exit("[ERROR] core/tool_manager.py is not yet implemented.")
 
-    from rich.table import Table
     from rich.console import Console
+    from rich.table import Table
 
     console = Console()
     tm = ToolManager(config)
@@ -190,44 +250,53 @@ def cmd_install_tools(config: dict[str, Any]) -> None:
     all_ok = True
     for name, status in statuses.items():
         if status.installed:
-            table.add_row(name, "[green]OK[/green]", status.version or "—", status.path or "—")
+            table.add_row(
+                name, "[green]OK[/green]", status.version or "—", status.path or "—"
+            )
         else:
             all_ok = False
-            # Attempt installation
             console.print(f"[yellow]Installing {name}…[/yellow]")
             try:
                 tm.ensure_tool(name)
                 table.add_row(name, "[green]INSTALLED[/green]", "—", "—")
-            except (ToolNotAvailableError, ReconBaseError) as exc:
+            except (ToolNotAvailableError, ToolInstallError) as exc:
                 logger.error("tool_install_failed", extra=exc.to_dict())
-                table.add_row(name, "[red]FAILED[/red]", "—", str(exc.context.get("reason", "")))
+                table.add_row(
+                    name,
+                    "[red]FAILED[/red]",
+                    "—",
+                    str(exc.context.get("reason", "")),
+                )
 
     console.print(table)
     if all_ok:
         console.print("[green]All tools are available.[/green]")
     else:
-        console.print("[yellow]Some tools could not be installed — see log for details.[/yellow]")
+        console.print(
+            "[yellow]Some tools could not be installed — check data/recon.log.[/yellow]"
+        )
 
 
-def cmd_scan(
-    targets: list[str],
+def _build_pipeline_components(
     config: dict[str, Any],
-    enable_nuclei: bool = True,
-    resume: bool = False,
-) -> None:
+) -> tuple[Any, Any, Any]:
     """
-    Run the full recon pipeline + intelligence pass for each target.
+    Import and instantiate the three objects shared by ``cmd_scan`` and
+    ``cmd_monitor``.
 
-    Args:
-        targets:       List of domain strings to scan.
-        config:        Loaded config dict.
-        enable_nuclei: Run nuclei in Stage 6 when True.
-        resume:        Load per-stage checkpoints when True; fresh scan otherwise.
+    Returns:
+        ``(ReconPipeline, IntelligenceAnalyzer, NotificationDispatcher)``
+
+    Exits:
+        With a clear message listing any modules that are not yet implemented.
     """
-    # Lazy imports — modules may not be implemented yet
+    required = {
+        "recon.pipeline": ("ReconPipeline",),
+        "intelligence.analyzer": ("IntelligenceAnalyzer",),
+        "notifications.dispatcher": ("NotificationDispatcher",),
+    }
     missing: list[str] = []
-    for module in ("core.tool_manager", "recon.pipeline", "intelligence.analyzer",
-                   "notifications.dispatcher", "output.writer"):
+    for module in required:
         try:
             __import__(module)
         except ImportError:
@@ -239,41 +308,62 @@ def cmd_scan(
             + "\n".join(f"  • {m}" for m in missing)
         )
 
-    from core.tool_manager import ToolManager
-    from recon.pipeline import ReconPipeline, PipelineOptions
+    from recon.pipeline import ReconPipeline
     from intelligence.analyzer import IntelligenceAnalyzer
     from notifications.dispatcher import NotificationDispatcher
-    from output.writer import OutputWriter
+
+    return ReconPipeline(config), IntelligenceAnalyzer(config), NotificationDispatcher(config)
+
+
+def cmd_scan(
+    targets: list[str],
+    config: dict[str, Any],
+    enable_nuclei: bool = True,
+    resume: bool = False,
+) -> None:
+    """
+    Run the full recon pipeline + intelligence pass for each target and write
+    all output files.
+
+    Args:
+        targets:       List of domain strings to scan.
+        config:        Loaded config dict.
+        enable_nuclei: Run nuclei (Stage 6) when True.
+        resume:        Load stage checkpoints when True; fresh scan otherwise.
+    """
+    try:
+        from output.writer import OutputWriter
+    except ImportError:
+        sys.exit("[ERROR] output/writer.py is not yet implemented.")
+
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
+    pipeline, analyzer, dispatcher = _build_pipeline_components(config)
+    writer = OutputWriter(base_dir=OUTPUT_DIR)
     console = Console()
 
-    # Verify required tools before starting
-    tm = ToolManager(config)
-    try:
-        statuses = tm.check_all()
-        missing_tools = [n for n, s in statuses.items() if not s.installed]
-        if missing_tools:
-            console.print(
-                f"[yellow]Missing tools: {', '.join(missing_tools)}. "
-                f"Run --install-tools first.[/yellow]"
-            )
-    except ReconBaseError as exc:
-        logger.warning("tool_check_failed", extra=exc.to_dict())
-
-    pipeline = ReconPipeline(config)
-    analyzer = IntelligenceAnalyzer(config)
-    dispatcher = NotificationDispatcher(config)
-    writer = OutputWriter(base_dir=OUTPUT_DIR)
-
     for target in targets:
-        scan_id = str(uuid.uuid4())
+        # Resolve scan_id — reuse existing checkpoint dir when resuming.
+        if resume:
+            scan_id = _find_latest_scan_id(target) or str(uuid.uuid4())
+            if not _find_latest_scan_id(target):
+                logger.info(
+                    "no_checkpoint_found_starting_fresh",
+                    extra={"target": target},
+                )
+        else:
+            scan_id = str(uuid.uuid4())
+
         console.rule(f"[bold cyan]Scanning: {target}[/bold cyan]")
         logger.info("scan_started", extra={
-            "scan_id": scan_id, "target": target,
-            "enable_nuclei": enable_nuclei, "resume": resume,
+            "scan_id": scan_id,
+            "target": target,
+            "enable_nuclei": enable_nuclei,
+            "resume": resume,
         })
+
+        from recon.pipeline import PipelineOptions
 
         options = PipelineOptions(
             enable_nuclei=enable_nuclei,
@@ -281,9 +371,11 @@ def cmd_scan(
             scan_id=scan_id,
         )
 
-        # ── Recon pipeline ────────────────────────────────────────────────────
+        # ── Stage: recon pipeline ─────────────────────────────────────────────
         pipeline_result = None
-        with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), console=console
+        ) as progress:
             task = progress.add_task("Running recon pipeline…")
             try:
                 pipeline_result = pipeline.run(targets=[target], options=options)
@@ -295,23 +387,26 @@ def cmd_scan(
                 })
             except CheckpointError as exc:
                 logger.warning("checkpoint_error", extra=exc.to_dict())
-                console.print(f"[yellow]Checkpoint warning: {exc.message}[/yellow]")
+                console.print(f"[yellow]Checkpoint warning (scan continues): {exc.message}[/yellow]")
             except ReconBaseError as exc:
                 logger.error("pipeline_failed", extra=exc.to_dict())
                 console.print(f"[red]Pipeline error: {exc}[/red]")
-                continue  # move to next target
+                continue
             except Exception as exc:
                 logger.exception("pipeline_unexpected_error", extra={
                     "scan_id": scan_id, "target": target, "error": str(exc),
                 })
-                console.print(f"[red]Unexpected error during pipeline: {exc}[/red]")
+                console.print(f"[red]Unexpected pipeline error: {exc}[/red]")
                 continue
 
         if pipeline_result is None:
             continue
 
-        # ── Intelligence pass ─────────────────────────────────────────────────
-        with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
+        # ── Stage: intelligence pass ──────────────────────────────────────────
+        intel_report = None
+        with Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), console=console
+        ) as progress:
             task = progress.add_task("Running intelligence analysis…")
             try:
                 intel_report = analyzer.analyze(pipeline_result)
@@ -323,30 +418,55 @@ def cmd_scan(
                 })
             except ReconBaseError as exc:
                 logger.error("intelligence_failed", extra=exc.to_dict())
-                console.print(f"[yellow]Intelligence analysis partial: {exc}[/yellow]")
-                intel_report = None
+                console.print(
+                    f"[yellow]Intelligence analysis partial (continuing): {exc}[/yellow]"
+                )
             except Exception as exc:
                 logger.exception("intelligence_unexpected_error", extra={
                     "scan_id": scan_id, "target": target, "error": str(exc),
                 })
-                intel_report = None
 
-        # ── Write output ──────────────────────────────────────────────────────
+        # ── Write output files ────────────────────────────────────────────────
         try:
             writer.write(target, pipeline_result, intel_report)
             out_dir = OUTPUT_DIR / target
-            console.print(f"[green]Results saved to:[/green] {out_dir}/")
+            console.print(f"[green]Results saved →[/green] {out_dir}/")
             if intel_report:
-                console.print(f"[bold green]Attack plan:[/bold green] {out_dir}/attack_plan.md")
+                console.print(
+                    f"[bold green]Attack plan →[/bold green] {out_dir}/attack_plan.md"
+                )
         except Exception as exc:
             logger.error("output_write_failed", extra={"target": target, "error": str(exc)})
             console.print(f"[red]Failed to write output: {exc}[/red]")
 
-        # ── Dispatch summary notification ─────────────────────────────────────
+        # ── Dispatch scan-complete notification ───────────────────────────────
         try:
-            dispatcher.dispatch_scan_complete(target, pipeline_result, intel_report)
+            from notifications.dispatcher import NotificationEvent
+            summary_msg = (
+                f"Scan complete for {target}: "
+                f"{len(pipeline_result.subdomains)} subdomains, "
+                f"{len(pipeline_result.live_hosts)} live hosts"
+                + (
+                    f", {len(intel_report.top_targets)} top targets"
+                    if intel_report else ""
+                )
+            )
+            event = NotificationEvent(
+                event_type="SCAN_COMPLETE",
+                severity="INFO",
+                target=target,
+                message=summary_msg,
+                data={
+                    "scan_id": scan_id,
+                    "subdomains": len(pipeline_result.subdomains),
+                    "live_hosts": len(pipeline_result.live_hosts),
+                },
+            )
+            dispatcher.dispatch(event)
         except ReconBaseError as exc:
             logger.warning("notification_dispatch_failed", extra=exc.to_dict())
+        except Exception as exc:
+            logger.warning("notification_dispatch_unexpected", extra={"error": str(exc)})
 
         logger.info("scan_complete", extra={"scan_id": scan_id, "target": target})
 
@@ -357,13 +477,16 @@ def cmd_monitor(
     interval_minutes: int = DEFAULT_MONITOR_INTERVAL,
 ) -> None:
     """
-    Start continuous monitoring mode: run the full pipeline on a fixed interval,
-    diff results against the previous snapshot, and alert on changes.
+    Start continuous monitoring mode.
+
+    Re-runs the full pipeline on a fixed interval, diffs results against the
+    previous snapshot, and dispatches alerts on new subdomains, ports, and
+    findings.
 
     Args:
         targets:          List of domains to monitor.
         config:           Loaded config dict.
-        interval_minutes: How often to re-run the scan.
+        interval_minutes: How often to re-run, in minutes.
     """
     try:
         from monitoring.monitor import MonitorScheduler
@@ -371,32 +494,22 @@ def cmd_monitor(
         sys.exit("[ERROR] monitoring/monitor.py is not yet implemented.")
 
     from rich.console import Console
+
+    pipeline, analyzer, dispatcher = _build_pipeline_components(config)
     console = Console()
 
-    try:
-        from recon.pipeline import ReconPipeline
-        from intelligence.analyzer import IntelligenceAnalyzer
-        from notifications.dispatcher import NotificationDispatcher
-    except ImportError as exc:
-        sys.exit(f"[ERROR] Required module not implemented: {exc}")
-
-    pipeline = ReconPipeline(config)
-    analyzer = IntelligenceAnalyzer(config)
-    dispatcher = NotificationDispatcher(config)
-
     scheduler = MonitorScheduler(config, pipeline, analyzer, dispatcher)
-
     console.print(
-        f"[cyan]Starting monitor for {len(targets)} target(s) "
-        f"— interval: {interval_minutes}m[/cyan]"
+        f"[cyan]Monitoring {len(targets)} target(s) every {interval_minutes} minute(s). "
+        f"Press Ctrl+C to stop.[/cyan]"
     )
     logger.info("monitor_started", extra={
-        "targets": targets, "interval_minutes": interval_minutes,
+        "targets": targets,
+        "interval_minutes": interval_minutes,
     })
 
     try:
         scheduler.start(targets=targets, interval_minutes=interval_minutes)
-        # Block until interrupted
         import time
         while True:
             time.sleep(60)
@@ -408,8 +521,9 @@ def cmd_monitor(
 
 def cmd_dashboard(config: dict[str, Any]) -> None:
     """
-    Launch the Flask web dashboard. Scan results are served from the SQLite
-    database — no active scan is required.
+    Launch the Flask web dashboard.
+
+    Reads scan results from the SQLite database. No active scan is required.
 
     Args:
         config: Loaded config dict.
@@ -419,21 +533,21 @@ def cmd_dashboard(config: dict[str, Any]) -> None:
     except ImportError:
         sys.exit("[ERROR] api/app.py is not yet implemented.")
 
-    host: str = config.get("dashboard", {}).get("host", "127.0.0.1")
-    port: int = config.get("dashboard", {}).get("port", 5000)
-    debug: bool = config.get("dashboard", {}).get("debug", False)
+    dashboard_cfg: dict[str, Any] = config.get("dashboard", {})
+    host: str = dashboard_cfg.get("host", "127.0.0.1")
+    port: int = int(dashboard_cfg.get("port", 5000))
+    debug: bool = bool(dashboard_cfg.get("debug", False))
 
     app = create_app(config)
-
-    print(f"Dashboard running at http://{host}:{port}")
+    print(f"Dashboard → http://{host}:{port}")
     logger.info("dashboard_started", extra={"host": host, "port": port})
 
-    try:
-        from flask_socketio import SocketIO
-        socketio: SocketIO = app.extensions["socketio"]
+    # Use Flask-SocketIO if it was registered inside create_app(), otherwise
+    # fall back to plain Flask so the dashboard still starts.
+    socketio = app.extensions.get("socketio")
+    if socketio is not None:
         socketio.run(app, host=host, port=port, debug=debug)
-    except KeyError:
-        # SocketIO not attached — fall back to plain Flask (dev mode)
+    else:
         app.run(host=host, port=port, debug=debug)
 
 
@@ -461,6 +575,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
+    )
+
     # ── Target selection (mutually exclusive) ─────────────────────────────────
     target_group = parser.add_mutually_exclusive_group()
     target_group.add_argument(
@@ -471,10 +591,13 @@ def _build_parser() -> argparse.ArgumentParser:
     target_group.add_argument(
         "--targets",
         metavar="FILE",
-        help="Path to a file containing one domain per line. Lines starting with # are ignored.",
+        help=(
+            "Path to a file with one domain per line. "
+            "Lines starting with '#' are ignored."
+        ),
     )
 
-    # ── Mode flags ────────────────────────────────────────────────────────────
+    # ── Mode flags (mutually exclusive) ──────────────────────────────────────
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--scan",
@@ -485,8 +608,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--monitor",
         action="store_true",
         help=(
-            "Run in continuous monitoring mode. Re-runs the pipeline on a fixed "
-            "interval and alerts on new subdomains, ports, and findings."
+            "Continuous monitoring mode: re-run on a fixed interval and "
+            "alert on new subdomains, ports, and findings."
         ),
     )
     mode_group.add_argument(
@@ -494,8 +617,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="install_tools",
         help=(
-            "Check for required tools (subfinder, amass, httpx, naabu, nuclei, "
-            "gau, waybackurls) and install any that are missing."
+            "Check for required tools (subfinder, amass, httpx, naabu, "
+            "nuclei, gau, waybackurls) and install any that are missing."
         ),
     )
     mode_group.add_argument(
@@ -509,18 +632,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-nuclei",
         action="store_true",
         dest="no_nuclei",
-        help=(
-            "Skip the nuclei vulnerability scan (Stage 6). Useful for faster "
-            "recon on large scopes where vuln scanning is done separately."
-        ),
+        help="Skip nuclei vulnerability scanning (Stage 6). Faster for large scopes.",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
         help=(
-            "Resume an interrupted scan. Completed stages are loaded from "
-            "checkpoints in data/checkpoints/ instead of being re-run. "
-            "If no checkpoint exists, the scan starts fresh without error."
+            "Resume an interrupted scan by loading stage checkpoints from "
+            "data/checkpoints/. Starts a fresh scan if no checkpoint exists "
+            "for the target."
         ),
     )
 
@@ -530,7 +650,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="MINUTES",
         default=DEFAULT_MONITOR_INTERVAL,
-        help=f"Monitoring interval in minutes (default: {DEFAULT_MONITOR_INTERVAL}). Only used with --monitor.",
+        help=f"Monitoring re-run interval in minutes (default: {DEFAULT_MONITOR_INTERVAL}).",
     )
 
     # ── Global options ────────────────────────────────────────────────────────
@@ -538,14 +658,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         metavar="PATH",
         default=str(CONFIG_PATH),
-        help=f"Path to config.json (default: {CONFIG_PATH}).",
+        help=f"Path to config.json (default: {CONFIG_PATH}). "
+             f"Create from template: cp config.example.json config.json",
     )
     parser.add_argument(
         "--log-level",
         metavar="LEVEL",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging verbosity (default: INFO).",
+        help="Log verbosity (default: INFO). DEBUG shows subprocess output.",
     )
 
     return parser
@@ -554,11 +675,12 @@ def _build_parser() -> argparse.ArgumentParser:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    """Parse arguments and dispatch to the appropriate command handler."""
     parser = _build_parser()
     args = parser.parse_args()
 
-    # Logging must be set up before any framework code runs so that exception
-    # handlers can log structured output from the first possible moment.
+    # Set up logging before any framework code runs so that exceptions raised
+    # during config load are still captured in the log file.
     _setup_logging(level=args.log_level)
 
     # ── Load config ───────────────────────────────────────────────────────────
@@ -568,7 +690,7 @@ def main() -> None:
         logger.critical("config_load_failed", extra=exc.to_dict())
         sys.exit(f"[CRITICAL] {exc}")
 
-    # ── Validate that a mode was chosen ───────────────────────────────────────
+    # ── Require a mode ────────────────────────────────────────────────────────
     if not any([args.scan, args.monitor, args.install_tools, args.dashboard]):
         parser.print_help()
         sys.exit(0)
@@ -594,7 +716,11 @@ def main() -> None:
             targets = _resolve_targets(args.target, args.targets)
             if args.interval < 1:
                 sys.exit("[ERROR] --interval must be at least 1 minute.")
-            cmd_monitor(targets=targets, config=config, interval_minutes=args.interval)
+            cmd_monitor(
+                targets=targets,
+                config=config,
+                interval_minutes=args.interval,
+            )
 
     except KeyboardInterrupt:
         print("\nInterrupted.")
@@ -602,9 +728,9 @@ def main() -> None:
         sys.exit(0)
 
     except ReconBaseError as exc:
-        # Top-level catch for any unhandled framework exception.
-        # Individual command functions are expected to handle their own exceptions
-        # and continue — reaching here means something went badly wrong.
+        # Last-resort handler for any unhandled framework exception.
+        # Command functions are expected to handle their own errors — reaching
+        # here indicates something went unexpectedly wrong at a top level.
         logger.critical("unhandled_framework_error", extra=exc.to_dict())
         sys.exit(f"[{exc.error_code}] {exc.message}")
 

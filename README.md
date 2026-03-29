@@ -54,52 +54,30 @@ Target input
 
 ```
 recon-framework/
-├── main.py                  CLI entry point
-├── config.json              API keys, scan settings, notification config
-├── requirements.txt
+├── main.py                  CLI entry point (implemented ✓)
+├── config.example.json      Config template — copy to config.json
+├── pyproject.toml           Package metadata and tool config
+├── requirements.txt         Runtime dependencies
+├── requirements-dev.txt     Dev/test dependencies
+├── LICENSE                  MIT
 │
 ├── core/                    Shared infrastructure
-│   ├── exceptions.py        Structured exception hierarchy
-│   ├── config_manager.py    Config load/validate/write
-│   ├── logger.py            JSON log formatter + rotating file handler
-│   ├── database.py          SQLite schema and query layer
-│   ├── checkpoint.py        Per-stage resume state
-│   └── tool_manager.py      Tool detection and auto-install
+│   ├── exceptions.py        Structured exception hierarchy (implemented ✓)
+│   ├── config_manager.py    Config load/validate/write (planned)
+│   ├── logger.py            JSON log formatter + rotating file handler (planned)
+│   ├── database.py          SQLite schema and query layer (planned)
+│   ├── checkpoint.py        Per-stage resume state (planned)
+│   └── tool_manager.py      Tool detection and auto-install (planned)
 │
-├── recon/                   Pipeline stages (each wraps one or more CLI tools)
-│   ├── pipeline.py          Stage orchestrator
-│   ├── subdomain_enum.py    subfinder + amass
-│   ├── live_hosts.py        httpx
-│   ├── port_scan.py         naabu
-│   ├── url_collection.py    gau + waybackurls
-│   ├── endpoint_filter.py   URL classification
-│   └── nuclei_scan.py       nuclei
+├── recon/                   Pipeline stages — each wraps one or more CLI tools (planned)
+├── intelligence/            Analysis layer (planned)
+├── monitoring/              Continuous mode scheduler (planned)
+├── notifications/           Alert dispatch — never blocks pipeline (planned)
+├── api/                     Flask REST API + WebSocket (planned)
+├── dashboard/               HTML/CSS/JS frontend (planned)
 │
-├── intelligence/            Analysis layer (no subprocess calls except JS fetches)
-│   ├── analyzer.py          Parallel orchestrator
-│   ├── js_analyzer.py       JS endpoint/secret/GraphQL extraction
-│   ├── vuln_patterns.py     IDOR, SSRF, open redirect, upload detection
-│   ├── param_discoverer.py  Parameter extraction + ffuf command generation
-│   ├── target_prioritizer.py  Scoring v2
-│   ├── change_detector.py   Snapshot diff + subdomain classification
-│   ├── correlation_engine.py  Attack chain detection
-│   ├── exploit_generator.py   Per-endpoint attack scenarios
-│   └── top_targets.py       Top 10 aggregation
-│
-├── monitoring/              Continuous mode
-│   ├── monitor.py           APScheduler-based scan loop
-│   └── diff_engine.py       Structured diff between snapshots
-│
-├── notifications/           Alert dispatch (never blocks pipeline)
-│   ├── dispatcher.py        queue.Queue + daemon thread
-│   ├── telegram.py          Bot API sender
-│   ├── discord.py           Webhook sender
-│   └── formatters.py        Message builders
-│
-├── api/                     Flask REST API + WebSocket
-├── dashboard/               HTML/CSS/JS frontend
-├── output/                  Scan results (created at runtime)
-├── data/                    SQLite database + checkpoints
+├── output/                  Scan results written here at runtime (gitignored)
+├── data/                    SQLite database + logs + checkpoints (gitignored)
 ├── tests/                   Unit and integration tests
 └── docs/                    Detailed documentation
 ```
@@ -108,7 +86,7 @@ recon-framework/
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Go 1.21+ *(for auto-installing recon tools)*
 - Linux or macOS
 
@@ -119,7 +97,14 @@ recon-framework/
 ```bash
 git clone https://github.com/your-handle/recon-framework.git
 cd recon-framework
+
+# Runtime dependencies
 pip install -r requirements.txt
+
+# Development/test dependencies (optional)
+pip install -r requirements-dev.txt
+
+# Check and install recon tools
 python main.py --install-tools
 ```
 
@@ -129,26 +114,21 @@ python main.py --install-tools
 
 ## Configuration
 
-Edit `config.json` before your first scan:
+Copy the example config and edit it before your first scan:
+
+```bash
+cp config.example.json config.json
+```
+
+> `config.json` is in `.gitignore` and will never be committed. Your API keys and notification tokens are safe.
+
+Key settings:
 
 ```json
 {
-  "api_keys": {
-    "shodan": "",
-    "securitytrails": "",
-    "virustotal": ""
-  },
   "notifications": {
-    "telegram": {
-      "enabled": false,
-      "bot_token": "123456:ABC...",
-      "chat_id": "-100123456789",
-      "min_severity": "MEDIUM"
-    },
-    "discord": {
-      "enabled": false,
-      "webhook_url": ""
-    }
+    "telegram": { "enabled": false, "bot_token": "", "chat_id": "" },
+    "discord":  { "enabled": false, "webhook_url": "" }
   },
   "scan": {
     "nuclei_enabled": true,
@@ -162,7 +142,7 @@ Edit `config.json` before your first scan:
 }
 ```
 
-All API keys are optional — the framework runs without them. See [`docs/usage.md`](docs/usage.md#configuration) for the full schema.
+All API keys are optional — the framework runs without them. See [`docs/usage.md`](docs/usage.md#2-configuration-reference) for the full schema.
 
 ---
 
@@ -232,11 +212,18 @@ Contributions are welcome. Please follow these guidelines:
 7. **Docs** — update `docs/usage.md` if you change a public interface or add a new module
 
 ```bash
-# Run tests
-pytest tests/ -v --cov=. --cov-report=term-missing
+# Install dev dependencies
+pip install -r requirements-dev.txt
 
-# Verify no import errors
+# Run tests (unit tests for core/exceptions.py run immediately)
+pytest tests/ -v --cov=core --cov-report=term-missing
+
+# Integration tests are skipped until pipeline modules are implemented
+# pytest -m integration tests/integration/
+
+# Verify CLI loads correctly
 python main.py --help
+python main.py --version
 ```
 
 Please open an issue before starting large changes so the approach can be agreed upfront.

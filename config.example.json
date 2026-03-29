@@ -1,0 +1,102 @@
+{
+  "api_keys": {
+    "shodan": "",
+    "securitytrails": "",
+    "virustotal": "",
+    "github": ""
+  },
+
+  "notifications": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": "",
+      "chat_id": "",
+      "min_severity": "MEDIUM"
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": "",
+      "min_severity": "MEDIUM"
+    },
+    "rate_limit_seconds": 30
+  },
+
+  "scan": {
+    "default_timeout_seconds": 300,
+    "httpx_batch_size": 100,
+    "httpx_threads": 50,
+    "naabu_rate": 1000,
+    "naabu_top_ports": "1000",
+    "subfinder_threads": 10,
+    "amass_passive_only": true,
+    "nuclei_enabled": true,
+    "nuclei_severity": ["critical", "high", "medium"],
+    "nuclei_templates": [],
+    "gau_threads": 5,
+    "max_js_files_per_host": 20,
+    "js_fetch_timeout_seconds": 10,
+    "url_filter_extensions_exclude": [
+      ".jpg", ".jpeg", ".png", ".gif", ".svg",
+      ".ico", ".css", ".woff", ".woff2", ".ttf",
+      ".eot", ".mp4", ".mp3", ".pdf"
+    ]
+  },
+
+  "monitoring": {
+    "enabled": false,
+    "interval_minutes": 60,
+    "targets": [],
+    "alert_on_new_subdomain": true,
+    "alert_on_new_port": true,
+    "alert_on_new_nuclei_finding": true
+  },
+
+  "intelligence": {
+    "top_targets_count": 10,
+    "min_score_threshold": 10,
+    "ffuf_wordlist": "/usr/share/seclists/Discovery/Web-Content/common.txt",
+    "entropy_threshold_api_key": 3.5,
+    "enable_exploit_generator": true,
+    "enable_correlation_engine": true,
+    "critical_score_threshold": 100,
+    "chain_score_boost": 50,
+    "vuln_pattern_confidence_min": "LOW"
+  },
+
+  "output": {
+    "base_dir": "output",
+    "save_raw_tool_output": true,
+    "generate_html_report": false
+  },
+
+  "dashboard": {
+    "host": "127.0.0.1",
+    "port": 5000,
+    "debug": false,
+    "secret_key": "change-me-before-use"
+  },
+
+  "database": {
+    "path": "data/recon.db",
+    "journal_mode": "WAL"
+  },
+
+  "logging": {
+    "level": "INFO",
+    "format": "json",
+    "file": "data/recon.log",
+    "max_bytes": 10485760,
+    "backup_count": 5
+  },
+
+  "tool_paths": {
+    "subfinder": "",
+    "amass": "",
+    "httpx": "",
+    "naabu": "",
+    "nuclei": "",
+    "gau": "",
+    "waybackurls": "",
+    "ffuf": ""
+  }
+}

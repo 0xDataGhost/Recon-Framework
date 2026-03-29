@@ -1,0 +1,54 @@
+# Runtime output — never commit scan results or logs
+data/recon.db
+data/*.log
+data/checkpoints/
+output/
+
+# Keep the directory stubs so git tracks the scaffold
+!data/.gitkeep
+!output/.gitkeep
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Type checker caches
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Secrets — never commit real config
+config.json
+!config.example.json
