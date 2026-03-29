@@ -95,7 +95,7 @@ recon-framework/
 ## Installation
 
 ```bash
-git clone https://github.com/your-handle/recon-framework.git
+git clone https://github.com/0xdataghost/recon-framework.git
 cd recon-framework
 
 # Runtime dependencies
