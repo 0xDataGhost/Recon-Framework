@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ target }} — Recon</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', monospace; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+    header { background: #161b22; border-bottom: 1px solid #30363d; padding: 14px 32px; display: flex; align-items: center; gap: 16px; }
+    header a { color: #58a6ff; text-decoration: none; font-size: 0.9rem; }
+    header a:hover { text-decoration: underline; }
+    header h1 { font-size: 1rem; color: #e6edf3; }
+    main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+    .stats-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 20px; min-width: 100px; }
+    .stat-value { font-size: 1.6rem; font-weight: bold; color: #58a6ff; }
+    .stat-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+    .tabs { display: flex; gap: 4px; border-bottom: 1px solid #30363d; margin-bottom: 20px; }
+    .tab { padding: 8px 18px; cursor: pointer; border-bottom: 2px solid transparent; color: #8b949e; font-size: 0.85rem; transition: color .15s; }
+    .tab:hover { color: #c9d1d9; }
+    .tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 0.78rem; line-height: 1.6; max-height: 600px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    .list { background: #161b22; border: 1px solid #30363d; border-radius: 6px; max-height: 600px; overflow-y: auto; }
+    .list-item { padding: 8px 14px; border-bottom: 1px solid #21262d; font-size: 0.82rem; word-break: break-all; }
+    .list-item:last-child { border-bottom: none; }
+    .list-item:hover { background: #1c2128; }
+    .host-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .code-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.72rem; }
+    .code-2 { background: #0d2818; color: #3fb950; }
+    .code-3 { background: #1f2d00; color: #d1a417; }
+    .code-4 { background: #3d1f00; color: #f97316; }
+    .code-5 { background: #2d0000; color: #f85149; }
+    .tech-tag { background: #1f2d3d; color: #79c0ff; border-radius: 3px; padding: 1px 6px; font-size: 0.7rem; }
+    .finding { padding: 12px 14px; border-bottom: 1px solid #21262d; }
+    .finding:last-child { border-bottom: none; }
+    .finding-title { font-weight: bold; color: #e6edf3; margin-bottom: 4px; }
+    .finding-meta { font-size: 0.75rem; color: #8b949e; }
+    .sev { padding: 1px 8px; border-radius: 3px; font-size: 0.72rem; font-weight: bold; }
+    .sev-critical { background: #2d0000; color: #ff7b72; }
+    .sev-high { background: #3d1f00; color: #f97316; }
+    .sev-medium { background: #2d2000; color: #e3b341; }
+    .sev-low { background: #0d2818; color: #3fb950; }
+    .sev-info { background: #1f2d3d; color: #79c0ff; }
+    .markdown { line-height: 1.7; font-size: 0.85rem; }
+    .markdown h1 { color: #58a6ff; font-size: 1.2rem; margin: 0 0 12px; }
+    .markdown h2 { color: #e6edf3; font-size: 1rem; margin: 20px 0 8px; border-bottom: 1px solid #30363d; padding-bottom: 4px; }
+    .markdown h3 { color: #c9d1d9; font-size: 0.9rem; margin: 14px 0 6px; }
+    .markdown table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .markdown th { background: #21262d; padding: 6px 10px; text-align: left; color: #8b949e; }
+    .markdown td { padding: 6px 10px; border-bottom: 1px solid #21262d; }
+    .markdown tr:hover td { background: #1c2128; }
+    .markdown code { background: #21262d; padding: 1px 5px; border-radius: 3px; font-size: 0.82em; }
+    .markdown p { margin: 6px 0; }
+    .markdown li { margin: 3px 0 3px 20px; }
+    .empty-panel { color: #8b949e; padding: 40px; text-align: center; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/">&#8592; Dashboard</a>
+    <h1>{{ target }}</h1>
+  </header>
+  <main>
+    <div class="stats-bar" id="stats"></div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('subdomains')">Subdomains</div>
+      <div class="tab" onclick="switchTab('live')">Live Hosts</div>
+      <div class="tab" onclick="switchTab('ports')">Ports</div>
+      <div class="tab" onclick="switchTab('urls')">URLs</div>
+      <div class="tab" onclick="switchTab('findings')">Findings</div>
+      <div class="tab" onclick="switchTab('plan')">Attack Plan</div>
+    </div>
+    <div id="subdomains" class="panel active"><p class="empty-panel">Loading…</p></div>
+    <div id="live" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="ports" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="urls" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="findings" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="plan" class="panel"><p class="empty-panel">Loading…</p></div>
+  </main>
+  <script>
+    const target = {{ target | tojson }};
+    let data = null;
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t,i) => {
+        const names = ['subdomains','live','ports','urls','findings','plan'];
+        t.classList.toggle('active', names[i] === name);
+      });
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.getElementById(name).classList.add('active');
+    }
+
+    function statusClass(code) {
+      if (!code) return '';
+      const c = String(code)[0];
+      return `code-${c}`;
+    }
+
+    function sevClass(sev) {
+      return `sev-${(sev || 'info').toLowerCase()}`;
+    }
+
+    function renderMarkdown(md) {
+      // Minimal markdown renderer: headers, bold, code, tables, lists
+      return md
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/^\| (.+) \|$/gm, (_, row) => {
+          const cells = row.split(' | ');
+          return '<tr>' + cells.map(c => `<td>${c}</td>`).join('') + '</tr>';
+        })
+        .replace(/(<tr>.*<\/tr>)/s, m => {
+          const rows = m.split('\n').filter(Boolean);
+          if (rows.length < 2) return m;
+          return '<table>' + rows[0].replace(/td>/g,'th>') + rows.slice(2).join('') + '</table>';
+        })
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/^(.+)$/gm, l => l.startsWith('<') ? l : `<p>${l}</p>`)
+        .replace(/<p><\/p>/g, '');
+    }
+
+    async function load() {
+      const res = await fetch(`/api/target/${encodeURIComponent(target)}`);
+      if (!res.ok) { document.getElementById('subdomains').innerHTML = '<p class="empty-panel">Scan data not found.</p>'; return; }
+      data = await res.json();
+
+      // Stats bar
+      document.getElementById('stats').innerHTML = [
+        ['Subdomains', data.subdomains.length],
+        ['Live Hosts', data.live_hosts.length],
+        ['URLs', data.urls.length],
+        ['JS Files', data.js_files.length],
+        ['Findings', data.nuclei_findings.length],
+      ].map(([label, val]) =>
+        `<div class="stat"><div class="stat-value">${val}</div><div class="stat-label">${label}</div></div>`
+      ).join('');
+
+      // Subdomains
+      document.getElementById('subdomains').innerHTML = data.subdomains.length
+        ? `<div class="list">${data.subdomains.map(s => `<div class="list-item">${s}</div>`).join('')}</div>`
+        : '<p class="empty-panel">No subdomains found.</p>';
+
+      // Live hosts
+      document.getElementById('live').innerHTML = data.live_hosts.length
+        ? `<div class="list">${data.live_hosts.map(h => {
+            const url = h.url || h.host || '';
+            const code = h['status-code'] || h.status_code || '';
+            const title = h.title || '';
+            const tech = (h.tech || h.technologies || []).slice(0,5);
+            return `<div class="list-item"><div class="host-row">
+              ${code ? `<span class="code-badge ${statusClass(code)}">${code}</span>` : ''}
+              <span>${url}</span>
+              ${title ? `<span style="color:#8b949e;font-size:0.75rem">${title}</span>` : ''}
+              ${tech.map(t => `<span class="tech-tag">${t}</span>`).join('')}
+            </div></div>`;
+          }).join('')}</div>`
+        : '<p class="empty-panel">No live hosts found.</p>';
+
+      // Ports
+      const ports = data.ports;
+      const portHosts = Object.keys(ports);
+      document.getElementById('ports').innerHTML = portHosts.length
+        ? `<div class="list">${portHosts.map(h =>
+            `<div class="list-item"><strong style="color:#e6edf3">${h}</strong> &nbsp;
+             ${ports[h].sort((a,b)=>a-b).map(p => `<span class="tech-tag">${p}</span>`).join(' ')}</div>`
+          ).join('')}</div>`
+        : '<p class="empty-panel">No port data.</p>';
+
+      // URLs
+      document.getElementById('urls').innerHTML = data.urls.length
+        ? `<div class="list">${data.urls.slice(0,2000).map(u =>
+            `<div class="list-item"><a href="${u}" target="_blank" rel="noreferrer" style="color:#58a6ff;text-decoration:none">${u}</a></div>`
+          ).join('')}${data.urls.length > 2000 ? `<div class="list-item" style="color:#8b949e">…and ${data.urls.length - 2000} more</div>` : ''}</div>`
+        : '<p class="empty-panel">No URLs collected.</p>';
+
+      // Findings
+      document.getElementById('findings').innerHTML = data.nuclei_findings.length
+        ? `<div class="list">${data.nuclei_findings.map(f => {
+            const info = f.info || {};
+            const sev = info.severity || 'info';
+            return `<div class="finding">
+              <div class="finding-title">
+                <span class="sev ${sevClass(sev)}">${sev.toUpperCase()}</span>
+                &nbsp;${info.name || f['template-id'] || 'Unknown'}
+              </div>
+              <div class="finding-meta">
+                ${f['matched-at'] ? `<code>${f['matched-at']}</code>` : ''}
+                ${info.description ? `<br>${info.description}` : ''}
+              </div>
+            </div>`;
+          }).join('')}</div>`
+        : '<p class="empty-panel">No nuclei findings.</p>';
+
+      // Attack plan
+      document.getElementById('plan').innerHTML = data.attack_plan
+        ? `<div class="markdown">${renderMarkdown(data.attack_plan)}</div>`
+        : '<p class="empty-panel">No attack plan generated.</p>';
+    }
+
+    load();
+  </script>
+</body>
+</html>

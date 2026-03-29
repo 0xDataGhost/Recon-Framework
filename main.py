@@ -333,8 +333,8 @@ def cmd_scan(
     """
     try:
         from output.writer import OutputWriter
-    except ImportError:
-        sys.exit("[ERROR] output/writer.py is not yet implemented.")
+    except ImportError as _e:
+        sys.exit(f"[ERROR] output/writer.py is not yet implemented. ({_e})")
 
     from rich.console import Console
     from rich.progress import Progress, SpinnerColumn, TextColumn

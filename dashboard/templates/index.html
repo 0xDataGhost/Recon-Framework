@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recon Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', monospace; background: #0d1117; color: #c9d1d9; min-height: 100vh; }
+    header { background: #161b22; border-bottom: 1px solid #30363d; padding: 16px 32px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 1.2rem; color: #58a6ff; letter-spacing: 1px; }
+    header span { color: #8b949e; font-size: 0.85rem; }
+    main { padding: 32px; max-width: 1200px; margin: 0 auto; }
+    .empty { text-align: center; color: #8b949e; padding: 80px 0; }
+    .empty code { display: block; margin-top: 12px; color: #58a6ff; font-size: 0.9rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; cursor: pointer; transition: border-color .2s; text-decoration: none; color: inherit; display: block; }
+    .card:hover { border-color: #58a6ff; }
+    .card-title { font-size: 1rem; color: #58a6ff; margin-bottom: 12px; word-break: break-all; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .stat { background: #0d1117; border-radius: 4px; padding: 8px 10px; }
+    .stat-value { font-size: 1.3rem; font-weight: bold; color: #e6edf3; }
+    .stat-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: .5px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin-top: 12px; }
+    .badge-findings { background: #3d1f00; color: #f97316; border: 1px solid #f97316; }
+    .badge-clean { background: #0d2818; color: #3fb950; border: 1px solid #3fb950; }
+    .ts { font-size: 0.72rem; color: #8b949e; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>&#9632; RECON</h1>
+    <span>Dashboard</span>
+  </header>
+  <main>
+    <div id="content"><p class="empty">Loading…</p></div>
+  </main>
+  <script>
+    async function load() {
+      const res = await fetch('/api/targets');
+      const targets = await res.json();
+      const el = document.getElementById('content');
+      if (!targets.length) {
+        el.innerHTML = '<p class="empty">No scans yet.<code>python3 main.py --target example.com --scan</code></p>';
+        return;
+      }
+      el.innerHTML = '<div class="grid">' + targets.map(t => {
+        const date = new Date(t.scanned_at * 1000).toLocaleString();
+        const badge = t.nuclei_findings > 0
+          ? `<span class="badge badge-findings">&#9888; ${t.nuclei_findings} finding${t.nuclei_findings > 1 ? 's' : ''}</span>`
+          : `<span class="badge badge-clean">&#10003; Clean</span>`;
+        return `<a class="card" href="/target/${encodeURIComponent(t.target)}">
+          <div class="card-title">${t.target}</div>
+          <div class="stats">
+            <div class="stat"><div class="stat-value">${t.subdomains}</div><div class="stat-label">Subdomains</div></div>
+            <div class="stat"><div class="stat-value">${t.live_hosts}</div><div class="stat-label">Live Hosts</div></div>
+            <div class="stat"><div class="stat-value">${t.urls}</div><div class="stat-label">URLs</div></div>
+            <div class="stat"><div class="stat-value">${t.nuclei_findings}</div><div class="stat-label">Findings</div></div>
+          </div>
+          ${badge}
+          <div class="ts">${date}</div>
+        </a>`;
+      }).join('') + '</div>';
+    }
+    load();
+  </script>
+</body>
+</html>
