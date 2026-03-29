@@ -58,12 +58,15 @@ class ReconBaseError(Exception):
         via ``extra=``.
 
         Returns:
-            Dict with keys: ``error_code``, ``error_type``, ``message``, ``context``.
+            Dict with keys: ``error_code``, ``error_type``, ``error_message``, ``context``.
+            Note: the key is ``error_message`` (not ``message``) to avoid
+            conflicting with the reserved ``message`` key in
+            :class:`logging.LogRecord` when passed via ``extra=``.
         """
         return {
             "error_code": self.error_code,
             "error_type": type(self).__name__,
-            "message": self.message,
+            "error_message": self.message,
             "context": self.context,
         }
 

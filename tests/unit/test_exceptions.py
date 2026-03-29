@@ -48,7 +48,7 @@ class TestReconBaseError:
         d = e.to_dict()
         assert d["error_code"] == "RECON_ERROR"
         assert d["error_type"] == "ReconBaseError"
-        assert d["message"] == "msg"
+        assert d["error_message"] == "msg"
         assert d["context"] == {"a": 1}
 
     def test_to_dict_is_json_serialisable(self) -> None:
@@ -322,7 +322,7 @@ class TestToDictContract:
         d = exc.to_dict()
         assert "error_code" in d
         assert "error_type" in d
-        assert "message" in d
+        assert "error_message" in d
         assert "context" in d
 
     @pytest.mark.parametrize("exc", ALL_EXCEPTIONS)
