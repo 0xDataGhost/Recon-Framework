@@ -1,16 +1,19 @@
 """
-recon/pipeline.py — multi-stage reconnaissance pipeline.
+recon/pipeline.py — orchestrates all reconnaissance stages.
 
-Stages
-------
-  1  subdomain_enum   subfinder + amass (parallel)
-  2  live_hosts       httpx  — HTTP probe, title, tech detection
-  3  port_scan        naabu  — top-1000 ports
-  4  url_collection   gau + waybackurls (parallel)
-  5  js_analysis      extract JS URLs from live hosts
-  6  nuclei           vulnerability scan (optional, --no-nuclei to skip)
+Stage order
+-----------
+  1  subdomain_enum     subfinder + amass (parallel)
+  2  live_hosts         httpx — HTTP probe with tech detection
+  3  port_scan          naabu — top-1000 ports
+  4  url_collection     gau + waybackurls (passive, parallel)
+  5  crawl              katana — active crawler (depth-limited)
+  6  js_analysis        download JS files, extract secrets + endpoints
+  7  vuln_scan          nuclei — vulnerability templates
 
-Each stage is checkpointed so a scan can be resumed with --resume.
+Each stage is checkpointed so ``--resume`` can skip completed stages.
+All external tool invocations use browser-like headers by default so
+basic bot-detection / Cloudflare checks are less likely to block them.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ import logging
 import shutil
 import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,11 +30,28 @@ from typing import Any
 from core.checkpoint import CheckpointManager
 from core.exceptions import PipelineStageError
 from recon.subdomain_enum import SubdomainEnumerator
+from recon.url_collection import URLCollector
+from recon.crawler import Crawler
+from recon.js_analyzer import JSAnalyzer, JSFinding
+from recon.vuln_scanner import VulnScanner, NucleiFinding
 
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_DIR = Path("data") / "checkpoints"
 _FALLBACK_BIN = Path.home() / ".local" / "bin"
+
+# Browser-like headers used for all tool invocations that accept -H flags.
+# Helps bypass trivial Cloudflare / WAF bot checks.
+_CF_BYPASS_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+}
 
 
 def _bin(name: str) -> str | None:
@@ -56,120 +75,231 @@ class PipelineOptions:
 class PipelineResult:
     target: str
     scan_id: str
+    # Stage outputs
     subdomains: list[str] = field(default_factory=list)
     live_hosts: list[dict[str, Any]] = field(default_factory=list)
     ports: dict[str, list[int]] = field(default_factory=dict)
-    urls: list[str] = field(default_factory=list)
-    js_files: list[str] = field(default_factory=list)
+    urls: list[str] = field(default_factory=list)            # passive (gau/waybackurls)
+    crawled_urls: list[str] = field(default_factory=list)    # active (katana)
+    js_files: list[str] = field(default_factory=list)        # JS URLs to analyze
+    js_findings: list[dict[str, Any]] = field(default_factory=list)   # secrets/endpoints
     nuclei_findings: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def all_urls(self) -> list[str]:
+        """Union of passive + crawled URLs, deduplicated."""
+        return sorted(set(self.urls) | set(self.crawled_urls))
 
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
 
 class ReconPipeline:
     """
-    Orchestrates all reconnaissance stages for a list of targets.
+    Run all recon stages for a target and return a :class:`PipelineResult`.
 
     Args:
-        config: Loaded framework config dict.
+        config: Loaded framework config dict.  Relevant top-level keys:
+            proxy (str):    HTTP/HTTPS proxy URL passed to all tools.
+            headers (dict): Extra HTTP headers merged over CF bypass defaults.
+
+    Config sub-sections respected by each stage module (see their docstrings):
+        url_collection, crawler, js_analysis, nuclei
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         self._config = config
-        self._enum = SubdomainEnumerator(config)
+        # Merge CF bypass headers with any user-supplied ones
+        self._headers: dict[str, str] = {
+            **_CF_BYPASS_HEADERS,
+            **config.get("headers", {}),
+        }
+        # Inject merged headers so stage modules pick them up
+        config_with_headers = {**config, "headers": self._headers}
+
+        self._enum = SubdomainEnumerator(config_with_headers)
+        self._url_collector = URLCollector(config_with_headers)
+        self._crawler = Crawler(config_with_headers)
+        self._js_analyzer = JSAnalyzer(config_with_headers)
+        self._vuln_scanner = VulnScanner(config_with_headers)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def run(self, targets: list[str], options: PipelineOptions) -> PipelineResult:
         """
-        Run all pipeline stages for the first target in *targets*.
+        Run all pipeline stages for ``targets[0]``.
 
-        Multiple targets are supported at the caller level (``cmd_scan``
-        iterates and calls ``run`` once per target).
-
-        Returns:
-            Populated :class:`PipelineResult`.
+        (Multiple targets are iterated at the ``cmd_scan`` level; each call
+        to ``run`` processes exactly one target.)
         """
         target = targets[0]
         cp = CheckpointManager(CHECKPOINT_DIR, options.scan_id)
         result = PipelineResult(target=target, scan_id=options.scan_id)
 
-        result.subdomains = self._stage_subdomains(target, cp, options.resume)
-        result.live_hosts = self._stage_live_hosts(result.subdomains, cp, options.resume)
-        result.ports = self._stage_ports(result.live_hosts, cp, options.resume)
-        result.urls = self._stage_urls(target, cp, options.resume)
-        result.js_files = self._stage_js(result.live_hosts, cp, options.resume)
+        # ── Stage 1: subdomain enumeration ────────────────────────────────────
+        result.subdomains = self._stage(
+            name="subdomain_enum",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: self._enum.run(target),
+            serialize=lambda d: {"subdomains": d},
+            deserialize=lambda d: d.get("subdomains", []),
+        )
 
+        # ── Stage 2: live host detection ──────────────────────────────────────
+        result.live_hosts = self._stage(
+            name="live_hosts",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: self._run_httpx(result.subdomains),
+            serialize=lambda d: {"live_hosts": d},
+            deserialize=lambda d: d.get("live_hosts", []),
+        )
+
+        # ── Stage 3: port scanning ────────────────────────────────────────────
+        result.ports = self._stage(
+            name="port_scan",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: self._run_naabu(result.live_hosts),
+            serialize=lambda d: {"ports": d},
+            deserialize=lambda d: d.get("ports", {}),
+        )
+
+        # ── Stage 4: passive URL collection ───────────────────────────────────
+        result.urls = self._stage(
+            name="url_collection",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: self._url_collector.run(target),
+            serialize=lambda d: {"urls": d},
+            deserialize=lambda d: d.get("urls", []),
+        )
+
+        # ── Stage 5: active crawling ──────────────────────────────────────────
+        crawl_result = self._stage(
+            name="crawl",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: self._run_crawl(result.live_hosts),
+            serialize=lambda d: {"crawled_urls": d[0], "js_files": d[1]},
+            deserialize=lambda d: (d.get("crawled_urls", []), d.get("js_files", [])),
+        )
+        result.crawled_urls, js_from_crawler = crawl_result
+
+        # ── Build JS file list: crawler + passive URLs ending in .js ──────────
+        js_from_passive = [u for u in result.urls if u.split("?")[0].endswith(".js")]
+        result.js_files = sorted(set(js_from_crawler) | set(js_from_passive))
+
+        # ── Stage 6: JS analysis ──────────────────────────────────────────────
+        result.js_findings = self._stage(
+            name="js_analysis",
+            cp=cp,
+            resume=options.resume,
+            run=lambda: [f.to_dict() for f in self._js_analyzer.analyze(result.js_files)],
+            serialize=lambda d: {"js_findings": d},
+            deserialize=lambda d: d.get("js_findings", []),
+        )
+
+        # ── Stage 7: vulnerability scan ───────────────────────────────────────
         if options.enable_nuclei:
-            result.nuclei_findings = self._stage_nuclei(result.live_hosts, cp, options.resume)
+            result.nuclei_findings = self._stage(
+                name="vuln_scan",
+                cp=cp,
+                resume=options.resume,
+                run=lambda: [f.to_dict() for f in self._vuln_scanner.run(result.all_urls)],
+                serialize=lambda d: {"findings": d},
+                deserialize=lambda d: d.get("findings", []),
+            )
         else:
             logger.info("nuclei_skipped", extra={"target": target})
 
         return result
 
-    # ── Stage 1: subdomain enumeration ────────────────────────────────────────
+    # ── Generic stage runner ───────────────────────────────────────────────────
 
-    def _stage_subdomains(
-        self, target: str, cp: CheckpointManager, resume: bool
-    ) -> list[str]:
-        stage = "subdomain_enum"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            subs = data.get("subdomains", [])
-            logger.info("stage_resumed", extra={"stage": stage, "count": len(subs)})
-            return subs
-
-        logger.info("stage_started", extra={"stage": stage, "target": target})
-        try:
-            subs = self._enum.run(target)
-        except Exception as exc:
-            raise PipelineStageError(stage, str(exc)) from exc
-
-        cp.save(stage, {"target": target, "subdomains": subs})
-        logger.info("stage_complete", extra={"stage": stage, "count": len(subs)})
-        return subs
-
-    # ── Stage 2: live host detection ──────────────────────────────────────────
-
-    def _stage_live_hosts(
+    def _stage(
         self,
-        subdomains: list[str],
+        *,
+        name: str,
         cp: CheckpointManager,
         resume: bool,
-    ) -> list[dict[str, Any]]:
-        stage = "live_hosts"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            hosts = data.get("live_hosts", [])
-            logger.info("stage_resumed", extra={"stage": stage, "count": len(hosts)})
-            return hosts
+        run: Any,
+        serialize: Any,
+        deserialize: Any,
+    ) -> Any:
+        """
+        Execute one pipeline stage with checkpoint support.
 
-        logger.info("stage_started", extra={"stage": stage, "count": len(subdomains)})
+        On resume, loads from checkpoint if the stage already completed.
+        Otherwise runs *run*, saves the result, and returns it.
+        """
+        if resume and cp.is_complete(name):
+            data = cp.load(name) or {}
+            result = deserialize(data)
+            _count = len(result) if hasattr(result, "__len__") else "?"
+            logger.info("stage_resumed", extra={"stage": name, "items": _count})
+            return result
 
+        logger.info("stage_started", extra={"stage": name})
+        try:
+            result = run()
+        except PipelineStageError:
+            raise
+        except Exception as exc:
+            raise PipelineStageError(name, str(exc)) from exc
+
+        try:
+            cp.save(name, serialize(result))
+        except Exception as exc:
+            logger.warning("checkpoint_save_failed", extra={"stage": name, "error": str(exc)})
+
+        _count = len(result) if hasattr(result, "__len__") else "?"
+        logger.info("stage_complete", extra={"stage": name, "items": _count})
+        return result
+
+    # ── Stage implementations ──────────────────────────────────────────────────
+
+    def _run_httpx(self, subdomains: list[str]) -> list[dict[str, Any]]:
         if not subdomains:
-            cp.save(stage, {"live_hosts": []})
             return []
 
-        httpx_bin = _bin("httpx")
-        if not httpx_bin:
-            logger.warning("httpx_not_found", extra={"stage": stage})
-            cp.save(stage, {"live_hosts": []})
+        httpx = _bin("httpx")
+        if not httpx:
+            logger.warning("httpx_not_found", extra={"hint": "run --install-tools"})
             return []
 
         hosts: list[dict[str, Any]] = []
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             tmp.write("\n".join(subdomains))
             tmp_path = tmp.name
 
         try:
             cmd = [
-                httpx_bin, "-l", tmp_path,
+                httpx,
+                "-l", tmp_path,
                 "-json", "-silent",
-                "-title", "-tech-detect", "-status-code",
-                "-timeout", "10",
-                "-threads", "50",
+                "-title", "-td",    # tech detection
+                "-sc",              # status code
+                "-timeout", "15",
+                "-threads", "25",
+                "-retries", "1",
+                "-no-color",
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            # Pass CF bypass headers
+            for key, value in self._headers.items():
+                cmd += ["-H", f"{key}: {value}"]
+
+            proxy = self._config.get("proxy")
+            if proxy:
+                cmd += ["-http-proxy", proxy]
+
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,   # 10 min hard cap for large subdomain lists
+            )
             for line in proc.stdout.splitlines():
                 line = line.strip()
                 if not line:
@@ -178,57 +308,49 @@ class ReconPipeline:
                     hosts.append(json.loads(line))
                 except json.JSONDecodeError:
                     pass
+
         except subprocess.TimeoutExpired:
-            logger.warning("httpx_timeout", extra={"stage": stage})
+            logger.warning("httpx_timeout")
         except Exception as exc:
-            logger.warning("httpx_error", extra={"stage": stage, "error": str(exc)})
+            logger.warning("httpx_error", extra={"error": str(exc)})
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-        cp.save(stage, {"live_hosts": hosts})
-        logger.info("stage_complete", extra={"stage": stage, "count": len(hosts)})
         return hosts
 
-    # ── Stage 3: port scanning ────────────────────────────────────────────────
-
-    def _stage_ports(
-        self,
-        live_hosts: list[dict[str, Any]],
-        cp: CheckpointManager,
-        resume: bool,
-    ) -> dict[str, list[int]]:
-        stage = "port_scan"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            ports = data.get("ports", {})
-            logger.info("stage_resumed", extra={"stage": stage})
-            return ports
-
-        logger.info("stage_started", extra={"stage": stage, "count": len(live_hosts)})
-
+    def _run_naabu(self, live_hosts: list[dict[str, Any]]) -> dict[str, list[int]]:
         if not live_hosts:
-            cp.save(stage, {"ports": {}})
             return {}
 
-        naabu_bin = _bin("naabu")
-        if not naabu_bin:
-            logger.warning("naabu_not_found", extra={"stage": stage})
-            cp.save(stage, {"ports": {}})
+        naabu = _bin("naabu")
+        if not naabu:
+            logger.warning("naabu_not_found", extra={"hint": "run --install-tools"})
             return {}
 
-        hostnames = list({h.get("host", h.get("url", "")).split("://")[-1].split("/")[0]
-                         for h in live_hosts if h.get("host") or h.get("url")})
+        hostnames = sorted({
+            (h.get("host") or h.get("url", "").split("://")[-1].split("/")[0]).split(":")[0]
+            for h in live_hosts
+            if h.get("host") or h.get("url")
+        })
         if not hostnames:
-            cp.save(stage, {"ports": {}})
             return {}
 
         ports: dict[str, list[int]] = {}
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
             tmp.write("\n".join(hostnames))
             tmp_path = tmp.name
 
         try:
-            cmd = [naabu_bin, "-l", tmp_path, "-json", "-silent", "-top-ports", "1000"]
+            cmd = [
+                naabu,
+                "-l", tmp_path,
+                "-json", "-silent",
+                "-top-ports", "1000",
+                "-timeout", "500",   # ms per port
+                "-retries", "1",
+                "-no-color",
+            ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             for line in proc.stdout.splitlines():
                 line = line.strip()
@@ -242,165 +364,18 @@ class ReconPipeline:
                         ports.setdefault(host, []).append(int(port))
                 except (json.JSONDecodeError, ValueError):
                     pass
+
         except subprocess.TimeoutExpired:
-            logger.warning("naabu_timeout", extra={"stage": stage})
+            logger.warning("naabu_timeout")
         except Exception as exc:
-            logger.warning("naabu_error", extra={"stage": stage, "error": str(exc)})
+            logger.warning("naabu_error", extra={"error": str(exc)})
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
-        cp.save(stage, {"ports": ports})
-        logger.info("stage_complete", extra={"stage": stage, "hosts_with_ports": len(ports)})
         return ports
 
-    # ── Stage 4: URL collection ───────────────────────────────────────────────
-
-    def _stage_urls(
-        self, target: str, cp: CheckpointManager, resume: bool
-    ) -> list[str]:
-        stage = "url_collection"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            urls = data.get("urls", [])
-            logger.info("stage_resumed", extra={"stage": stage, "count": len(urls)})
-            return urls
-
-        logger.info("stage_started", extra={"stage": stage, "target": target})
-
-        urls: list[str] = []
-
-        def _run_gau() -> list[str]:
-            gau = _bin("gau")
-            if not gau:
-                logger.warning("gau_not_found")
-                return []
-            try:
-                proc = subprocess.run(
-                    [gau, "--subs", target],
-                    capture_output=True, text=True, timeout=120,
-                )
-                return [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-            except Exception as exc:
-                logger.warning("gau_error", extra={"error": str(exc)})
-                return []
-
-        def _run_wayback() -> list[str]:
-            wb = _bin("waybackurls")
-            if not wb:
-                logger.warning("waybackurls_not_found")
-                return []
-            try:
-                proc = subprocess.run(
-                    [wb, target],
-                    capture_output=True, text=True, timeout=120,
-                )
-                return [l.strip() for l in proc.stdout.splitlines() if l.strip()]
-            except Exception as exc:
-                logger.warning("waybackurls_error", extra={"error": str(exc)})
-                return []
-
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            futures = [ex.submit(_run_gau), ex.submit(_run_wayback)]
-            for f in as_completed(futures):
-                try:
-                    urls.extend(f.result())
-                except Exception:
-                    pass
-
-        urls = sorted(set(urls))
-        cp.save(stage, {"urls": urls})
-        logger.info("stage_complete", extra={"stage": stage, "count": len(urls)})
-        return urls
-
-    # ── Stage 5: JS file extraction ───────────────────────────────────────────
-
-    def _stage_js(
+    def _run_crawl(
         self,
         live_hosts: list[dict[str, Any]],
-        cp: CheckpointManager,
-        resume: bool,
-    ) -> list[str]:
-        stage = "js_analysis"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            js = data.get("js_files", [])
-            logger.info("stage_resumed", extra={"stage": stage, "count": len(js)})
-            return js
-
-        logger.info("stage_started", extra={"stage": stage})
-
-        js_files: list[str] = []
-        for host_rec in live_hosts:
-            # httpx JSON may include a "body" or we scan urls ending in .js
-            url = host_rec.get("url", "")
-            if url.endswith(".js"):
-                js_files.append(url)
-
-        js_files = sorted(set(js_files))
-        cp.save(stage, {"js_files": js_files})
-        logger.info("stage_complete", extra={"stage": stage, "count": len(js_files)})
-        return js_files
-
-    # ── Stage 6: nuclei ───────────────────────────────────────────────────────
-
-    def _stage_nuclei(
-        self,
-        live_hosts: list[dict[str, Any]],
-        cp: CheckpointManager,
-        resume: bool,
-    ) -> list[dict[str, Any]]:
-        stage = "nuclei"
-        if resume and cp.is_complete(stage):
-            data = cp.load(stage) or {}
-            findings = data.get("findings", [])
-            logger.info("stage_resumed", extra={"stage": stage, "count": len(findings)})
-            return findings
-
-        logger.info("stage_started", extra={"stage": stage, "count": len(live_hosts)})
-
-        if not live_hosts:
-            cp.save(stage, {"findings": []})
-            return []
-
-        nuclei_bin = _bin("nuclei")
-        if not nuclei_bin:
-            logger.warning("nuclei_not_found", extra={"stage": stage})
-            cp.save(stage, {"findings": []})
-            return []
-
-        urls = [h.get("url", "") for h in live_hosts if h.get("url")]
-        if not urls:
-            cp.save(stage, {"findings": []})
-            return []
-
-        findings: list[dict[str, Any]] = []
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tmp:
-            tmp.write("\n".join(urls))
-            tmp_path = tmp.name
-
-        try:
-            cmd = [
-                nuclei_bin, "-l", tmp_path,
-                "-json", "-silent",
-                "-severity", "medium,high,critical",
-                "-timeout", "10",
-            ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    findings.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
-        except subprocess.TimeoutExpired:
-            logger.warning("nuclei_timeout", extra={"stage": stage})
-        except Exception as exc:
-            logger.warning("nuclei_error", extra={"stage": stage, "error": str(exc)})
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
-
-        cp.save(stage, {"findings": findings})
-        logger.info("stage_complete", extra={"stage": stage, "count": len(findings)})
-        return findings
+    ) -> tuple[list[str], list[str]]:
+        return self._crawler.run(live_hosts)

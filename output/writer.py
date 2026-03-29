@@ -1,16 +1,19 @@
 """
-output/writer.py — write per-target scan results to flat files.
+output/writer.py — serialise scan results to organised flat files.
 
 Directory layout
 ----------------
     output/<target>/
-        subdomains.txt          one subdomain per line
+        subdomains.txt          one per line
         live_hosts.json         httpx records
-        ports.json              host -> [port, ...]
-        urls.txt                one URL per line
-        js_files.txt            one JS URL per line
-        nuclei_findings.json    nuclei records
-        attack_plan.md          human-readable attack plan (if intel_report available)
+        ports.json              {host: [port, ...]}
+        urls.txt                passive URLs (gau / waybackurls)
+        crawled_urls.txt        active URLs (katana)
+        all_urls.txt            union of passive + crawled, deduplicated
+        js_files.txt            JS file URLs
+        js_findings.json        secrets and endpoints extracted from JS
+        nuclei_findings.json    nuclei vulnerability records
+        attack_plan.md          full markdown report with scoring + vectors
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 class OutputWriter:
     """
-    Write all scan artefacts for a single target to ``base_dir/<target>/``.
+    Write all scan artefacts for a single target.
 
     Args:
         base_dir: Root output directory (e.g. ``Path("output")``).
@@ -34,95 +37,144 @@ class OutputWriter:
     def __init__(self, base_dir: Path) -> None:
         self._base = Path(base_dir)
 
-    # ── Public API ─────────────────────────────────────────────────────────────
-
     def write(self, target: str, pipeline_result: Any, intel_report: Any) -> Path:
         """
-        Serialise *pipeline_result* and *intel_report* to disk.
+        Serialise *pipeline_result* and *intel_report* to ``base_dir/<target>/``.
 
         Args:
             target:          Domain string.
-            pipeline_result: A :class:`recon.pipeline.PipelineResult` instance.
-            intel_report:    A :class:`intelligence.analyzer.IntelReport` instance,
-                             or ``None`` if the intelligence pass was skipped/failed.
+            pipeline_result: :class:`recon.pipeline.PipelineResult`.
+            intel_report:    :class:`intelligence.analyzer.IntelReport` or ``None``.
 
         Returns:
-            The directory where files were written.
+            Directory path where all files were written.
         """
-        out_dir = self._base / target
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out = self._base / target
+        out.mkdir(parents=True, exist_ok=True)
 
-        self._write_lines(out_dir / "subdomains.txt", pipeline_result.subdomains)
-        self._write_json(out_dir / "live_hosts.json", pipeline_result.live_hosts)
-        self._write_json(out_dir / "ports.json", pipeline_result.ports)
-        self._write_lines(out_dir / "urls.txt", pipeline_result.urls)
-        self._write_lines(out_dir / "js_files.txt", pipeline_result.js_files)
-        self._write_json(out_dir / "nuclei_findings.json", pipeline_result.nuclei_findings)
+        r = pipeline_result
+
+        self._lines(out / "subdomains.txt",      r.subdomains)
+        self._json(out / "live_hosts.json",       r.live_hosts)
+        self._json(out / "ports.json",            r.ports)
+        self._lines(out / "urls.txt",             r.urls)
+        self._lines(out / "crawled_urls.txt",     r.crawled_urls)
+        self._lines(out / "all_urls.txt",         r.all_urls)
+        self._lines(out / "js_files.txt",         r.js_files)
+        self._json(out / "js_findings.json",      r.js_findings)
+        self._json(out / "nuclei_findings.json",  r.nuclei_findings)
 
         if intel_report is not None:
-            self._write_attack_plan(out_dir / "attack_plan.md", intel_report)
+            self._attack_plan(out / "attack_plan.md", r, intel_report)
 
-        logger.info(
-            "output_written",
-            extra={
-                "target": target,
-                "directory": str(out_dir),
-                "subdomains": len(pipeline_result.subdomains),
-                "live_hosts": len(pipeline_result.live_hosts),
-            },
-        )
-        return out_dir
+        logger.info("output_written", extra={
+            "target": target,
+            "dir": str(out),
+            "subdomains": len(r.subdomains),
+            "live_hosts": len(r.live_hosts),
+            "all_urls": len(r.all_urls),
+            "js_findings": len(r.js_findings),
+            "nuclei_findings": len(r.nuclei_findings),
+        })
+        return out
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _write_lines(path: Path, items: list[str]) -> None:
-        path.write_text("\n".join(items) + ("\n" if items else ""), encoding="utf-8")
+    def _lines(path: Path, items: list[str]) -> None:
+        path.write_text(
+            "\n".join(items) + ("\n" if items else ""),
+            encoding="utf-8",
+        )
 
     @staticmethod
-    def _write_json(path: Path, data: Any) -> None:
+    def _json(path: Path, data: Any) -> None:
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
-    def _write_attack_plan(self, path: Path, intel_report: Any) -> None:
-        """Render an attack_plan.md from the IntelReport."""
+    def _attack_plan(
+        self, path: Path, r: Any, report: Any
+    ) -> None:
         lines: list[str] = []
 
-        # Use the pre-built summary if available
-        summary = getattr(intel_report, "summary", "")
-        if summary:
-            lines.append(summary)
+        # Pre-built summary from the analyzer
+        if getattr(report, "summary", ""):
+            lines.append(report.summary)
         else:
-            lines.append("# Attack Plan\n")
+            lines.append(f"# Attack Plan — {r.target}\n")
 
-        # Top targets table
-        top_targets: list[dict[str, Any]] = getattr(intel_report, "top_targets", [])
-        if top_targets:
-            lines.append("\n## Priority Targets\n")
-            lines.append("| Host | Score | Ports | Technologies | Nuclei Findings |")
-            lines.append("|------|-------|-------|--------------|-----------------|")
-            for t in top_targets[:20]:
-                ports_str = ", ".join(str(p) for p in t.get("open_ports", [])) or "—"
-                tech_str = ", ".join(t.get("technologies", [])) or "—"
-                nuclei_count = len(t.get("nuclei_findings", []))
-                lines.append(
-                    f"| `{t['host']}` | {t['score']} | {ports_str} | {tech_str} | {nuclei_count} |"
-                )
-
-        # Attack chains
-        attack_chains: list[dict[str, Any]] = getattr(intel_report, "attack_chains", [])
-        if attack_chains:
-            lines.append("\n## Attack Chains\n")
-            for chain in attack_chains:
-                sev = chain.get("max_severity", "info").upper()
-                lines.append(f"### {chain['host']} [{sev}]\n")
-                lines.append(f"- **Findings:** {chain['finding_count']}")
-                for ep in chain.get("entry_points", []):
-                    lines.append(f"- Entry point: `{ep}`")
-                for finding in chain.get("findings", [])[:5]:
-                    info = finding.get("info", {})
-                    name = info.get("name", finding.get("template-id", "unknown"))
-                    matched = finding.get("matched-at", "")
-                    lines.append(f"  - [{info.get('severity','info').upper()}] **{name}** @ `{matched}`")
-                lines.append("")
+        # ── Per-target detailed section ────────────────────────────────────────
+        top: list[dict[str, Any]] = getattr(report, "top_targets", [])
+        if top:
+            lines += ["\n---\n", "## Detailed Target Analysis\n"]
+            for t in top[:10]:
+                lines += self._target_section(t)
 
         path.write_text("\n".join(lines), encoding="utf-8")
+
+    @staticmethod
+    def _target_section(t: dict[str, Any]) -> list[str]:
+        """Render a per-host section with ports, tech, findings, and vectors."""
+        sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "⚪"}
+
+        lines: list[str] = [
+            f"### `{t['host']}` (score: {t['score']})",
+            "",
+        ]
+
+        status = t.get("status_code")
+        title = t.get("title", "")
+        url = t.get("url", "")
+        if url:
+            lines.append(f"**URL:** {url}  ")
+        if status:
+            lines.append(f"**Status:** {status}  ")
+        if title:
+            lines.append(f"**Title:** {title}  ")
+        lines.append("")
+
+        tech = t.get("technologies", [])
+        if tech:
+            lines.append(f"**Technologies:** {', '.join(tech)}")
+            lines.append("")
+
+        ports = t.get("open_ports", [])
+        if ports:
+            lines.append(f"**Open Ports:** {', '.join(str(p) for p in ports)}")
+            lines.append("")
+
+        vectors: list[dict[str, Any]] = t.get("attack_vectors", [])
+        crit_high = [v for v in vectors if v["severity"] in ("critical", "high")]
+        if crit_high:
+            lines.append("**Attack Surface (critical/high):**")
+            for v in crit_high[:8]:
+                icon = sev_emoji.get(v["severity"], "")
+                path_str = f" → `{v['path']}`" if v.get("path") else ""
+                src = f"port {v['port']}" if v.get("port") else v.get("technology", "")
+                lines.append(f"- {icon} [{v['severity'].upper()}] {v['vector']} ({src}){path_str}")
+            lines.append("")
+
+        nuclei: list[dict[str, Any]] = t.get("nuclei_findings", [])
+        if nuclei:
+            lines.append("**Nuclei Findings:**")
+            for f in nuclei[:5]:
+                sev = f.get("severity", "info")
+                icon = sev_emoji.get(sev, "")
+                lines.append(
+                    f"- {icon} [{sev.upper()}] **{f.get('name', '?')}** "
+                    f"→ `{f.get('matched_at', '')}`"
+                )
+            lines.append("")
+
+        js_findings: list[dict[str, Any]] = t.get("js_findings", [])
+        high_js = [f for f in js_findings if f.get("severity") in ("high", "critical")]
+        if high_js:
+            lines.append("**High-Severity JS Findings:**")
+            for f in high_js[:5]:
+                icon = sev_emoji.get(f.get("severity", "info"), "")
+                lines.append(
+                    f"- {icon} **{f.get('type', '?')}** in `{f.get('js_url', '?')}`"
+                )
+            lines.append("")
+
+        lines.append("---\n")
+        return lines
