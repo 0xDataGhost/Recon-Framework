@@ -2,7 +2,6 @@
 data/recon.db
 data/*.log
 data/checkpoints/
-output/
 
 # Keep the directory stubs so git tracks the scaffold
 !data/.gitkeep
