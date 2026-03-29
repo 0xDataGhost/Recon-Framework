@@ -6,7 +6,7 @@ Stage order
   1  subdomain_enum     subfinder + amass (parallel)
   2  live_hosts         httpx — HTTP probe with tech detection
   3  port_scan          naabu — top-1000 ports
-  4  url_collection     gau + waybackurls (passive, parallel)
+  4  url_collection     multi-layer URL discovery (tools → robots → crawl → JS → probe)
   5  crawl              katana — active crawler (depth-limited)
   6  js_analysis        download JS files, extract secrets + endpoints
   7  vuln_scan          nuclei — vulnerability templates
@@ -30,10 +30,11 @@ from typing import Any
 from core.checkpoint import CheckpointManager
 from core.exceptions import PipelineStageError
 from recon.subdomain_enum import SubdomainEnumerator
-from recon.url_collection import URLCollector
+from recon.url_discovery import URLDiscovery
 from recon.crawler import Crawler
 from recon.js_analyzer import JSAnalyzer, JSFinding
 from recon.vuln_scanner import VulnScanner, NucleiFinding
+from recon.wordpress import WordPressScanner, WPResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ class PipelineResult:
     js_files: list[str] = field(default_factory=list)        # JS URLs to analyze
     js_findings: list[dict[str, Any]] = field(default_factory=list)   # secrets/endpoints
     nuclei_findings: list[dict[str, Any]] = field(default_factory=list)
+    wp_findings: list[dict[str, Any]] = field(default_factory=list)   # per-WP-host results
 
     @property
     def all_urls(self) -> list[str]:
@@ -103,7 +105,7 @@ class ReconPipeline:
             headers (dict): Extra HTTP headers merged over CF bypass defaults.
 
     Config sub-sections respected by each stage module (see their docstrings):
-        url_collection, crawler, js_analysis, nuclei
+        url_discovery, crawler, js_analysis, nuclei
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -117,10 +119,11 @@ class ReconPipeline:
         config_with_headers = {**config, "headers": self._headers}
 
         self._enum = SubdomainEnumerator(config_with_headers)
-        self._url_collector = URLCollector(config_with_headers)
+        self._url_discovery = URLDiscovery(config_with_headers)
         self._crawler = Crawler(config_with_headers)
         self._js_analyzer = JSAnalyzer(config_with_headers)
         self._vuln_scanner = VulnScanner(config_with_headers)
+        self._wp_scanner = WordPressScanner(config_with_headers)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -165,12 +168,12 @@ class ReconPipeline:
             deserialize=lambda d: d.get("ports", {}),
         )
 
-        # ── Stage 4: passive URL collection ───────────────────────────────────
+        # ── Stage 4: URL discovery (multi-layer fallback) ─────────────────────
         result.urls = self._stage(
             name="url_collection",
             cp=cp,
             resume=options.resume,
-            run=lambda: self._url_collector.run(target),
+            run=lambda: self._url_discovery.run(target, result.live_hosts),
             serialize=lambda d: {"urls": d},
             deserialize=lambda d: d.get("urls", []),
         )
@@ -200,7 +203,22 @@ class ReconPipeline:
             deserialize=lambda d: d.get("js_findings", []),
         )
 
-        # ── Stage 7: vulnerability scan ───────────────────────────────────────
+        # ── Stage 7: WordPress scan (auto-activated) ─────────────────────────
+        wp_hosts = self._wordpress_hosts(result.live_hosts)
+        if wp_hosts:
+            logger.info("wp_hosts_detected", extra={"count": len(wp_hosts)})
+            result.wp_findings = self._stage(
+                name="wp_scan",
+                cp=cp,
+                resume=options.resume,
+                run=lambda: self._run_wp_scan(wp_hosts),
+                serialize=lambda d: {"wp_findings": d},
+                deserialize=lambda d: d.get("wp_findings", []),
+            )
+        else:
+            logger.info("wp_not_detected", extra={"target": target})
+
+        # ── Stage 8: vulnerability scan ───────────────────────────────────────
         if options.enable_nuclei:
             result.nuclei_findings = self._stage(
                 name="vuln_scan",
@@ -379,3 +397,38 @@ class ReconPipeline:
         live_hosts: list[dict[str, Any]],
     ) -> tuple[list[str], list[str]]:
         return self._crawler.run(live_hosts)
+
+    @staticmethod
+    def _wordpress_hosts(live_hosts: list[dict[str, Any]]) -> list[str]:
+        """
+        Return URLs of hosts where WordPress was detected by httpx tech detection.
+
+        httpx encodes tech as either a list of strings or a list of dicts
+        depending on version. We handle both.
+        """
+        wp_urls: list[str] = []
+        for h in live_hosts:
+            url = h.get("url", "")
+            if not url:
+                continue
+            tech_raw = h.get("tech") or h.get("technologies") or []
+            tech_names: list[str] = []
+            for t in tech_raw:
+                if isinstance(t, str):
+                    tech_names.append(t.lower())
+                elif isinstance(t, dict):
+                    tech_names.append(t.get("name", "").lower())
+            if any("wordpress" in t for t in tech_names):
+                wp_urls.append(url.rstrip("/"))
+        return wp_urls
+
+    def _run_wp_scan(self, wp_urls: list[str]) -> list[dict[str, Any]]:
+        """Run WordPressScanner on each detected WP host and return serialised results."""
+        results: list[dict[str, Any]] = []
+        for url in wp_urls:
+            try:
+                wp_result = self._wp_scanner.scan(url)
+                results.append(wp_result.to_dict())
+            except Exception as exc:
+                logger.warning("wp_scan_error", extra={"url": url, "error": str(exc)})
+        return results

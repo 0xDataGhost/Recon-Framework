@@ -70,13 +70,17 @@
       <div class="tab" onclick="switchTab('live')">Live Hosts</div>
       <div class="tab" onclick="switchTab('ports')">Ports</div>
       <div class="tab" onclick="switchTab('urls')">URLs</div>
-      <div class="tab" onclick="switchTab('findings')">Findings</div>
+      <div class="tab" onclick="switchTab('js')">JS Findings</div>
+      <div class="tab" onclick="switchTab('wordpress')">WordPress</div>
+      <div class="tab" onclick="switchTab('findings')">Nuclei</div>
       <div class="tab" onclick="switchTab('plan')">Attack Plan</div>
     </div>
     <div id="subdomains" class="panel active"><p class="empty-panel">Loading…</p></div>
     <div id="live" class="panel"><p class="empty-panel">Loading…</p></div>
     <div id="ports" class="panel"><p class="empty-panel">Loading…</p></div>
     <div id="urls" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="js" class="panel"><p class="empty-panel">Loading…</p></div>
+    <div id="wordpress" class="panel"><p class="empty-panel">Loading…</p></div>
     <div id="findings" class="panel"><p class="empty-panel">Loading…</p></div>
     <div id="plan" class="panel"><p class="empty-panel">Loading…</p></div>
   </main>
@@ -86,7 +90,7 @@
 
     function switchTab(name) {
       document.querySelectorAll('.tab').forEach((t,i) => {
-        const names = ['subdomains','live','ports','urls','findings','plan'];
+        const names = ['subdomains','live','ports','urls','js','wordpress','findings','plan'];
         t.classList.toggle('active', names[i] === name);
       });
       document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -178,6 +182,78 @@
             `<div class="list-item"><a href="${u}" target="_blank" rel="noreferrer" style="color:#58a6ff;text-decoration:none">${u}</a></div>`
           ).join('')}${data.urls.length > 2000 ? `<div class="list-item" style="color:#8b949e">…and ${data.urls.length - 2000} more</div>` : ''}</div>`
         : '<p class="empty-panel">No URLs collected.</p>';
+
+      // JS Findings
+      const jsFi = data.js_findings || [];
+      document.getElementById('js').innerHTML = jsFi.length
+        ? `<div class="list">${jsFi.map(f => {
+            const sev = f.severity || 'info';
+            return `<div class="finding">
+              <div class="finding-title">
+                <span class="sev ${sevClass(sev)}">${sev.toUpperCase()}</span>
+                &nbsp;<strong>${f.type || '?'}</strong>
+              </div>
+              <div class="finding-meta">
+                <code>${f.js_url || ''}</code><br>
+                Match: <code>${(f.match || '').substring(0,120)}</code>
+              </div>
+            </div>`;
+          }).join('')}</div>`
+        : '<p class="empty-panel">No JS findings.</p>';
+
+      // WordPress
+      const wpSites = data.wordpress_findings || [];
+      if (wpSites.length) {
+        const sevEmoji = {critical:'🔴',high:'🟠',medium:'🟡',low:'🔵',info:'⚪'};
+        document.getElementById('wordpress').innerHTML = wpSites.map(wp => {
+          const users = wp.users || [];
+          const plugins = wp.plugins || [];
+          const themes = wp.themes || [];
+          const findings = (wp.findings || []).sort((a,b) =>
+            ({critical:0,high:1,medium:2,low:3,info:4}[a.severity]||5) -
+            ({critical:0,high:1,medium:2,low:3,info:4}[b.severity]||5)
+          );
+          return `<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;margin-bottom:20px">
+            <h3 style="color:#58a6ff;margin-bottom:12px">${wp.site_url}</h3>
+            <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:16px">
+              ${wp.wp_version ? `<span style="background:#1f2d3d;color:#79c0ff;padding:3px 10px;border-radius:4px;font-size:.8rem">WP ${wp.wp_version}</span>` : ''}
+              <span style="background:${wp.xmlrpc_enabled?'#3d1f00':'#0d2818'};color:${wp.xmlrpc_enabled?'#f97316':'#3fb950'};padding:3px 10px;border-radius:4px;font-size:.8rem">
+                XMLRPC: ${wp.xmlrpc_enabled ? 'Enabled ⚠️' : 'Disabled'}
+              </span>
+              <span style="background:#21262d;color:#c9d1d9;padding:3px 10px;border-radius:4px;font-size:.8rem">${users.length} users</span>
+              <span style="background:#21262d;color:#c9d1d9;padding:3px 10px;border-radius:4px;font-size:.8rem">${plugins.length} plugins</span>
+            </div>
+            ${users.length ? `<div style="margin-bottom:14px">
+              <div style="color:#8b949e;font-size:.75rem;text-transform:uppercase;margin-bottom:6px">Enumerated Users</div>
+              ${users.map(u=>`<span style="background:#21262d;color:#e6edf3;padding:2px 8px;border-radius:3px;font-size:.8rem;margin:2px;display:inline-block">
+                #${u.id||'?'} <strong>${u.username||u.slug||'?'}</strong>${u.name?' ('+u.name+')':''}
+              </span>`).join('')}
+            </div>` : ''}
+            ${plugins.length ? `<div style="margin-bottom:14px">
+              <div style="color:#8b949e;font-size:.75rem;text-transform:uppercase;margin-bottom:6px">Plugins</div>
+              ${plugins.map(p=>`<span style="background:#1f2d3d;color:#79c0ff;padding:2px 8px;border-radius:3px;font-size:.75rem;margin:2px;display:inline-block">${p}</span>`).join('')}
+            </div>` : ''}
+            ${themes.length ? `<div style="margin-bottom:14px">
+              <div style="color:#8b949e;font-size:.75rem;text-transform:uppercase;margin-bottom:6px">Themes</div>
+              ${themes.map(t=>`<span style="background:#21262d;color:#c9d1d9;padding:2px 8px;border-radius:3px;font-size:.75rem;margin:2px;display:inline-block">${t}</span>`).join('')}
+            </div>` : ''}
+            ${findings.length ? `<div>
+              <div style="color:#8b949e;font-size:.75rem;text-transform:uppercase;margin-bottom:6px">Findings</div>
+              <div class="list">${findings.map(f=>`
+                <div class="finding">
+                  <div class="finding-title">
+                    <span class="sev ${sevClass(f.severity)}">${f.severity.toUpperCase()}</span>
+                    &nbsp;${f.label}
+                  </div>
+                  <div class="finding-meta">${f.detail||''} — <code>${f.url||''}</code></div>
+                </div>`).join('')}
+              </div>
+            </div>` : ''}
+          </div>`;
+        }).join('');
+      } else {
+        document.getElementById('wordpress').innerHTML = '<p class="empty-panel">WordPress not detected on any live host.</p>';
+      }
 
       // Findings
       document.getElementById('findings').innerHTML = data.nuclei_findings.length

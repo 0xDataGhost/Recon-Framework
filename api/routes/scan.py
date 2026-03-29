@@ -49,9 +49,13 @@ def _load_target(target_dir: Path) -> dict[str, Any]:
         "live_hosts": read_json("live_hosts.json"),
         "ports": read_json("ports.json"),
         "urls": read_lines("urls.txt"),
+        "crawled_urls": read_lines("crawled_urls.txt"),
         "js_files": read_lines("js_files.txt"),
+        "js_findings": read_json("js_findings.json"),
         "nuclei_findings": read_json("nuclei_findings.json"),
+        "wordpress_findings": read_json("wordpress_findings.json"),
         "attack_plan": read_text("attack_plan.md"),
+        "wordpress_report": read_text("wordpress_report.md"),
     }
 
 

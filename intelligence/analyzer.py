@@ -118,6 +118,19 @@ class IntelligenceAnalyzer:
                 sev = finding.get("severity", "info").lower()
                 hosts[matched]["score"] += _SEV_SCORE.get(sev, 0)
 
+        # Attach WordPress findings to relevant hosts
+        for wp in getattr(result, "wp_findings", []):
+            wp_host = self._extract_host_from_str(wp.get("site_url", ""))
+            if wp_host in hosts:
+                hosts[wp_host]["wp_result"] = wp
+                # Score boost: user enum = +5, xmlrpc = +3, per plugin = +1
+                hosts[wp_host]["score"] += len(wp.get("users", [])) * 5
+                hosts[wp_host]["score"] += 3 if wp.get("xmlrpc_enabled") else 0
+                hosts[wp_host]["score"] += len(wp.get("plugins", []))
+                for f in wp.get("findings", []):
+                    sev = f.get("severity", "info").lower()
+                    hosts[wp_host]["score"] += _SEV_SCORE.get(sev, 0)
+
         # Attach suggested attack vectors
         for entry in hosts.values():
             entry["attack_vectors"] = suggest(
@@ -211,6 +224,10 @@ class IntelligenceAnalyzer:
         all_urls_count = len(getattr(result, "all_urls", result.urls))
         high_js = [f for f in result.js_findings if f.get("severity") in ("high", "critical")]
         total_vectors = sum(len(t.get("attack_vectors", [])) for t in top_targets)
+        wp_findings = getattr(result, "wp_findings", [])
+        wp_hosts = len(wp_findings)
+        wp_users = sum(len(w.get("users", [])) for w in wp_findings)
+        wp_plugins = sum(len(w.get("plugins", [])) for w in wp_findings)
 
         lines: list[str] = [
             f"# Recon Report — {result.target}",
@@ -230,8 +247,14 @@ class IntelligenceAnalyzer:
             f"| Nuclei findings | {len(result.nuclei_findings)} |",
             f"| Attack vectors identified | {total_vectors} |",
             f"| Attack chains | {len(attack_chains)} |",
-            "",
         ]
+        if wp_hosts:
+            lines += [
+                f"| WordPress sites scanned | {wp_hosts} |",
+                f"| WP users enumerated | {wp_users} |",
+                f"| WP plugins detected | {wp_plugins} |",
+            ]
+        lines += ["", ""]
 
         if top_targets:
             lines += [

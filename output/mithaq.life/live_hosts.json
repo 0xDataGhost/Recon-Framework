@@ -1,1 +1,186 @@
-[]
+[
+  {
+    "timestamp": "2026-03-29T17:49:08.375997+02:00",
+    "cdn_name": "cloudflare",
+    "cdn_type": "waf",
+    "port": "443",
+    "url": "https://services.mithaq.life",
+    "input": "services.mithaq.life",
+    "scheme": "https",
+    "webserver": "cloudflare",
+    "content_type": "text/html",
+    "method": "GET",
+    "host": "services.mithaq.life",
+    "host_ip": "162.159.136.54",
+    "path": "/",
+    "time": "412.762333ms",
+    "a": [
+      "162.159.136.54",
+      "162.159.137.54"
+    ],
+    "aaaa": [
+      "2606:4700:7::a29f:8836",
+      "2606:4700:7::a29f:8936"
+    ],
+    "cname": [
+      "secure.cloudways.cloud"
+    ],
+    "tech": [
+      "Cloudflare",
+      "Cloudflare Bot Management",
+      "Cloudways",
+      "HTTP/3"
+    ],
+    "words": 52,
+    "lines": 75,
+    "status_code": 200,
+    "content_length": 18592,
+    "failed": false,
+    "cdn": true,
+    "knowledgebase": {
+      "pHash": 0
+    },
+    "resolvers": [
+      "1.1.1.1:53",
+      "163.121.128.135:53"
+    ]
+  },
+  {
+    "timestamp": "2026-03-29T17:49:08.394218+02:00",
+    "cdn_name": "cloudflare",
+    "cdn_type": "waf",
+    "port": "443",
+    "url": "https://consultation.mithaq.life",
+    "input": "consultation.mithaq.life",
+    "scheme": "https",
+    "webserver": "cloudflare",
+    "content_type": "text/html",
+    "method": "GET",
+    "host": "consultation.mithaq.life",
+    "host_ip": "162.159.136.54",
+    "path": "/",
+    "time": "416.11725ms",
+    "a": [
+      "162.159.136.54",
+      "162.159.137.54"
+    ],
+    "aaaa": [
+      "2606:4700:7::a29f:8836",
+      "2606:4700:7::a29f:8936"
+    ],
+    "cname": [
+      "secure.cloudways.cloud"
+    ],
+    "tech": [
+      "Cloudflare",
+      "Cloudflare Bot Management",
+      "Cloudways",
+      "HTTP/3"
+    ],
+    "words": 85,
+    "lines": 88,
+    "status_code": 200,
+    "content_length": 23812,
+    "failed": false,
+    "cdn": true,
+    "knowledgebase": {
+      "pHash": 0
+    },
+    "resolvers": [
+      "8.8.4.4:53",
+      "1.1.1.1:53"
+    ]
+  },
+  {
+    "timestamp": "2026-03-29T17:49:08.448614+02:00",
+    "cdn_name": "cloudflare",
+    "cdn_type": "waf",
+    "port": "443",
+    "url": "https://academy.mithaq.life",
+    "input": "academy.mithaq.life",
+    "scheme": "https",
+    "webserver": "cloudflare",
+    "content_type": "text/html",
+    "method": "GET",
+    "host": "academy.mithaq.life",
+    "host_ip": "162.159.136.54",
+    "path": "/",
+    "time": "435.283542ms",
+    "a": [
+      "162.159.136.54",
+      "162.159.137.54"
+    ],
+    "aaaa": [
+      "2606:4700:7::a29f:8836",
+      "2606:4700:7::a29f:8936"
+    ],
+    "cname": [
+      "secure.cloudways.cloud"
+    ],
+    "tech": [
+      "Cloudflare",
+      "Cloudflare Bot Management",
+      "Cloudways",
+      "HTTP/3"
+    ],
+    "words": 207,
+    "lines": 214,
+    "status_code": 200,
+    "content_length": 50365,
+    "failed": false,
+    "cdn": true,
+    "knowledgebase": {
+      "pHash": 0
+    },
+    "resolvers": [
+      "163.121.128.135:53",
+      "163.121.128.134:53"
+    ]
+  },
+  {
+    "timestamp": "2026-03-29T17:49:08.530249+02:00",
+    "cdn_name": "cloudflare",
+    "cdn_type": "waf",
+    "port": "443",
+    "url": "https://www.mithaq.life",
+    "input": "www.mithaq.life",
+    "location": "https://mithaq.life/",
+    "scheme": "https",
+    "webserver": "cloudflare",
+    "content_type": "text/html",
+    "method": "GET",
+    "host": "www.mithaq.life",
+    "host_ip": "162.159.137.54",
+    "path": "/",
+    "time": "626.667916ms",
+    "a": [
+      "162.159.136.54",
+      "162.159.137.54"
+    ],
+    "aaaa": [
+      "2606:4700:7::a29f:8836",
+      "2606:4700:7::a29f:8936"
+    ],
+    "cname": [
+      "secure.cloudways.cloud"
+    ],
+    "tech": [
+      "Cloudflare",
+      "Cloudflare Bot Management",
+      "HTTP/3"
+    ],
+    "words": 0,
+    "lines": 0,
+    "status_code": 301,
+    "content_length": 0,
+    "failed": false,
+    "cdn": true,
+    "knowledgebase": {
+      "pHash": 0
+    },
+    "resolvers": [
+      "8.8.8.8:53",
+      "1.0.0.1:53"
+    ]
+  }
+]
